@@ -1,0 +1,9 @@
+# 运行产物：探针日志与派生品都不该进版本库
+*.log
+load-probe.log
+.dsh-mem/
+
+# 测试/构建残留
+node_modules/
+coverage/
+*.tmp

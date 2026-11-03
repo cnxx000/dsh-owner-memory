@@ -1,0 +1,39 @@
+{
+  "name": "dsh-owner-memory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DSH 用的本地长期记忆插件：五工具 + 1200 字符 L0 每轮注入 + 可体检；记忆只落工作区，无网络请求。",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "memory",
+    "agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cnxx000/dsh-owner-memory.git"
+  },
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test",
+    "test:fast": "node --test --test-skip-pattern=\"A3|A3b|ABA\" --experimental-test-isolation=none"
+  },
+  "dependencies": {}
+}

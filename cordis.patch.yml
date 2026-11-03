@@ -1,0 +1,17 @@
+- insert:
+    - id: owner-memory
+      name: 'dsh-owner-memory'
+      config:
+        row: memory
+        root: '.dsh-mem'
+        globalRoot: '~/.dsh/owner-memory'
+        variableName: owner_memory
+        # 名单里的 preset 人设应该引用 {{owner_memory}}；名单外的不接线，自检不误判。
+        # 填你自己的 preset id；留空也能工作（引用了变量就判定），留空只是抓不到
+        # 「人设本该接线却被改坏」这一类回归。
+        wiredPresets:
+          - whalechan
+        injectMaxChars: 1200
+        recallLimit: 4
+        recallMaxChars: 800
+        foldAtLines: 20000
