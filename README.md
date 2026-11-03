@@ -61,10 +61,14 @@ L0 通过 persona 的 `{{owner_memory}}` 变量进系统提示；L2 靠工具调
 1. 把本仓库加进 profile 的 `package.json` 依赖：
 
    ```json
-   "dsh-owner-memory": "github:<你的用户名>/dsh-owner-memory#v0.1.0"
+   "dsh-owner-memory": "github:cnxx000/dsh-owner-memory#v0.1.0"
    ```
 
-   本机开发也可以直接用本地路径：`"dsh-owner-memory": "link:C:/path/to/owner-memory"`。
+   公开仓库走 `github:` 协议即可，npm 不需要额外凭证。本机开发想边改边验，可以改用本地路径（注意 `link:` 是 pnpm 的写法，npm 用 `file:`）：
+
+   ```json
+   "dsh-owner-memory": "file:C:/path/to/owner-memory"
+   ```
 
 2. 若你的 DSH 版本要求显式声明 bundle，把 `dsh-owner-memory` 加进 `dsh.profile.bundles`；不要求的话装进依赖即可。
 3. 在 profile 目录执行 `npm install`。
