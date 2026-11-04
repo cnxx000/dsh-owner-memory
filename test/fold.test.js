@@ -89,3 +89,29 @@ test('A17：100 条十年前 active 事件一条不折叠', async (t) => {
   assert.equal(after.length, 100);
   assert.deepEqual(after.map((item) => item.id).sort(), events.map((item) => item.id).sort());
 });
+
+test('confirm 与被折叠目标一起进入归档并保持可重建', async (t) => {
+  const config = workspace(t);
+  const events = [
+    event('m_target_0001', '2020-01-01T00:00:00.000Z', 'note', '旧结论。'),
+    event('m_confirm_0002', '2020-01-02T00:00:00.000Z', 'confirm', '确认：m_target_0001 再次被想起。', {
+      refs: ['m_target_0001'],
+    }),
+    event('m_revise_0003', '2020-01-03T00:00:00.000Z', 'revise', '旧结论已修正。', {
+      refs: ['m_target_0001'],
+    }),
+  ];
+  writeEvents(config.localRoot, events);
+  await rebuildState(config.localRoot, { ...config, recordRebuild: false });
+
+  const result = await foldEvents(config, { now: '2026-11-02T12:00:00.000Z' });
+  const archived = fs.readFileSync(result.archive, 'utf8')
+    .split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line));
+  const state = readJson(path.join(config.localRoot, 'state.json'));
+
+  assert.deepEqual(
+    archived.map((item) => item.id).sort(),
+    ['m_confirm_0002', 'm_target_0001'].sort(),
+  );
+  assert.equal(state.confirmCount.m_target_0001, 1);
+});

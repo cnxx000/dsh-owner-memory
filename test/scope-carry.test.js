@@ -130,7 +130,7 @@ test('同一工作区并发两个新会话各 carry 一次且登记不覆盖', a
     carryOnce(state, { root: config.localRoot, sess: 'new-left' }),
     carryOnce(state, { root: config.localRoot, sess: 'new-right' }),
   ]);
-  const persisted = readJson(path.join(config.localRoot, 'state.json'));
+  const persisted = readJson(path.join(config.localRoot, 'runtime.json'));
 
   assert.notEqual(left.text, '');
   assert.notEqual(right.text, '');

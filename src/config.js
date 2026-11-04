@@ -4,17 +4,20 @@ import path from 'node:path';
 // 默认值只在这里出现，避免宿主配置、工具实现和测试各自形成一套事实。
 export const DEFAULTS = Object.freeze({
   localRoot: '.dsh-mem',
+  aliasesPath: path.join('.dsh-mem', 'aliases.json'),
   globalRoot: path.join('~', '.dsh', 'owner-memory'),
   injectMaxChars: 1200,
   recallLimit: 4,
   recallMaxChars: 800,
+  symptomsInRecall: true,
   foldAtLines: 20_000,
   foldAtBytes: 8 * 1024 * 1024,
   foldRetentionMs: 180 * 24 * 60 * 60 * 1000,
   staleLockMs: 15_000,
   retryDelaysMs: Object.freeze([0, 20, 60, 120, 240]),
-  // 440ms 只够空闲机器走一轮；2000ms 允许高负载调度，且远小于 15s 陈旧阈值。
-  lockMaxWaitMs: 2_000,
+  // 440ms 只够空闲机器走一轮。2026-11-04 实测：满负载下 40 个短命子进程并发写，
+  // 2000ms 会以「锁等待 2017ms」超时（A3b 抖动 5–6 次），提到 5000ms 仍远小于 15s 陈旧阈值。
+  lockMaxWaitMs: 5_000,
   // 交接等待独立于退避节奏，避免当前进程释放后立刻再次抢回锁。
   handoffMs: 60,
   dedupWindowMs: 7 * 24 * 60 * 60 * 1000,
@@ -26,6 +29,14 @@ export const DEFAULTS = Object.freeze({
   defaultScope: 'local',
   defaultSrc: 'agent',
   defaultWeight: 2,
+  vector: Object.freeze({
+    // 2026-11-04：实测未达止损线（C 组 0/4、p95 569ms），默认关闭；代码保留为实验层。
+    // 换模型或换运行时后可用 `vector.enabled=true` 复测，评估脚本见 scripts/vec-eval.mjs。
+    enabled: false,
+    floor: null,
+    beta: 0.5,
+    modelDir: path.join('~', '.dsh', 'owner-memory', 'models', 'bge-small-zh-v1.5@75c43b0'),
+  }),
   // 哪些 agent preset 本来就应该引用 {{owner_memory}}。只有名单里的 preset 才会在
   // 「没引用变量」时判为注入缺失——否则创造模式这类不接线的 preset 会一直误报。
   wiredPresets: Object.freeze([]),
@@ -43,6 +54,17 @@ export function resolveConfig(options = {}) {
   const workspace = path.resolve(options.workspace ?? process.cwd());
   const localSetting = options.root ?? DEFAULTS.localRoot;
   const globalSetting = options.globalRoot ?? DEFAULTS.globalRoot;
+  const localRoot = path.isAbsolute(localSetting)
+    ? path.normalize(localSetting)
+    : path.resolve(workspace, localSetting);
+  const aliasesExplicit = options.aliasesPath !== undefined;
+  const aliasesSetting = options.aliasesPath ?? path.join(localRoot, 'aliases.json');
+  const home = options.home ?? os.homedir();
+  const vector = {
+    ...DEFAULTS.vector,
+    ...(options.vector ?? {}),
+  };
+  vector.modelDir = path.resolve(expandHome(vector.modelDir, home));
 
   return Object.freeze({
     ...DEFAULTS,
@@ -51,10 +73,15 @@ export function resolveConfig(options = {}) {
     // 相对 root 表示「每个会话各自一份」；绝对 root 是主人指定的固定位置。
     localRootRelative: !path.isAbsolute(localSetting),
     localRelative: localSetting,
-    localRoot: path.isAbsolute(localSetting)
-      ? path.normalize(localSetting)
-      : path.resolve(workspace, localSetting),
+    localRoot,
+    aliasesPathExplicit: aliasesExplicit,
+    aliasesPathRelative: aliasesExplicit && !path.isAbsolute(aliasesSetting),
+    aliasesRelative: aliasesExplicit ? aliasesSetting : null,
+    aliasesPath: path.isAbsolute(aliasesSetting)
+      ? path.normalize(aliasesSetting)
+      : path.resolve(workspace, aliasesSetting),
     globalRoot: path.resolve(expandHome(globalSetting, options.home ?? os.homedir())),
+    vector: Object.freeze(vector),
     retryDelaysMs: [...(options.retryDelaysMs ?? DEFAULTS.retryDelaysMs)],
     wiredPresets: [...(options.wiredPresets ?? DEFAULTS.wiredPresets)],
   });
@@ -73,10 +100,16 @@ export function configForWorkspace(config, workspace) {
   if (!config?.localRootRelative || !workspace) return config;
   const resolved = path.resolve(workspace);
   if (resolved === config.workspace) return config;
+  const localRoot = path.resolve(resolved, config.localRelative ?? DEFAULTS.localRoot);
   return Object.freeze({
     ...config,
     workspace: resolved,
-    localRoot: path.resolve(resolved, config.localRelative ?? DEFAULTS.localRoot),
+    localRoot,
+    aliasesPath: config.aliasesPathExplicit
+      ? (config.aliasesPathRelative
+        ? path.resolve(resolved, config.aliasesRelative)
+        : config.aliasesPath)
+      : path.join(localRoot, 'aliases.json'),
   });
 }
 

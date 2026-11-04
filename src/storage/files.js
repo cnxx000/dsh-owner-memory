@@ -116,8 +116,19 @@ export function readJson(file, fallback = {}) {
 export function persistPinnedHealth(root, health = {}) {
   return updateHealth(root, (current) => ({
     ...current,
+    ablation: ['none', 'no-pit', 'off'].includes(health.ablation)
+      ? health.ablation
+      : 'none',
     rules_overflow: health.rules_overflow === true,
     rules_truncated_hard: health.rules_truncated_hard === true,
+    fact_overflow: Array.isArray(health.fact_overflow) ? [...health.fact_overflow] : [],
+    fact_headline_missing: Array.isArray(health.fact_headline_missing)
+      ? [...health.fact_headline_missing]
+      : [],
+    pit_overflow: Array.isArray(health.pit_overflow) ? [...health.pit_overflow] : [],
+    pit_symptom_missing: Array.isArray(health.pit_symptom_missing)
+      ? [...health.pit_symptom_missing]
+      : [],
   }));
 }
 
@@ -128,7 +139,12 @@ export function updateHealth(root, patch) {
     lock_stolen: 0,
     rebuilt: 0,
     rules_overflow: 0,
+    fact_overflow: [],
+    fact_headline_missing: [],
+    pit_overflow: [],
+    pit_symptom_missing: [],
     injection_missing: false,
+    ablation: 'none',
   });
   const next = typeof patch === 'function' ? patch(current) : { ...current, ...patch };
   atomicWrite(file, `${JSON.stringify(next, null, 2)}\n`);

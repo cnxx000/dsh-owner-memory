@@ -98,8 +98,11 @@ test('agent/created：把工具补挂到 agent，并把变量挂到 agent 的 sy
   const provider = agentVariables.get('owner_memory');
   assert.equal(typeof provider, 'function');
   const text = provider();
-  assert.match(text, /【主人记忆 · /);
-  assert.match(text, /## 关于主人/);
+  assert.match(text, /【长期记忆 · /);
+  assert.match(
+    text,
+    /## 长期记忆（截至 \d{4}-\d{2}-\d{2}；记的是主人和主人的项目，不含鲸鱼娘自己）/u,
+  );
   fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -146,45 +149,53 @@ test('agent/created 只认宿主真实 payload：裸 agent 不挂，{ agent } �
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-test('注入自检：assemble 中间件能判定「没进提示」并写进 health', async () => {
+test('注入自检：只按精确 persona 段的确定信号写 health', async () => {
   const { root, config } = workspace();
   const { host, handlers } = fakeHost();
   apply(host, config);
-  const { agent, agentHandlers, agentVariables } = fakeAgent();
+  const { agent, agentHandlers, agentVariables } = fakeAgent(undefined, 'session-inject-check', 'whalechan');
   handlers.get('agent/created')({ agent, source: 'startup' });
   const provider = agentVariables.get('owner_memory');
-  const firstLine = provider().split('\n')[0];
 
   const assemble = agentHandlers.get('system-prompt/assemble');
   assert.equal(typeof assemble, 'function', '必须挂 system-prompt/assemble 做自检');
 
   const healthFile = path.join(root, '.dsh-mem', 'health.json');
   const readHealth = () => JSON.parse(fs.readFileSync(healthFile, 'utf8'));
+  const key = `${process.pid}:session-inject-check`;
+  const persona = { name: 'deployment:persona-prefix', text: '{{owner_memory}}' };
 
-  // 提示里没有记忆 → injection_missing 为真
-  await assemble({}, {}, async () => ({ text: '完全无关的系统提示' }));
+  // 人设引用变量但 variables 没注册，是确定的 not_registered。
+  const missing = { sections: [persona], contexts: [], tools: [], variables: {} };
+  await assemble(missing, {}, async () => missing);
   assert.equal(readHealth().injection_missing, true);
+  assert.equal(readHealth().injection[key].reason, 'not_registered');
 
-  // 提示里带了记忆横幅 → 归零
-  await assemble({}, {}, async () => ({ text: `开头\n${firstLine}\n结尾` }));
+  // provider 与 assemble 共享 context，引用段仍存在 → provider_observed。
+  const context = {};
+  const pinned = provider(context);
+  const healthy = {
+    sections: [persona], contexts: [], tools: [], variables: { owner_memory: pinned },
+  };
+  await assemble(healthy, context, async () => healthy);
   assert.equal(readHealth().injection_missing, false);
+  assert.equal(readHealth().injection[key].reason, 'provider_observed');
   fs.rmSync(root, { recursive: true, force: true });
 });
 
 test('注入自检认结构化 assembly：{{owner_memory}} 在 persona 段里就算进去了', async () => {
-  // 2026-11-03 假警报：真宿主交给 system-prompt/assemble 的是 PromptAssembly，
-  // 不是最终文本。旧代码 String(assembly) => "[object Object]"，每轮都误报缺失。
   const { root, config } = workspace();
   const { host, handlers } = fakeHost();
   apply(host, config);
   const { agent, agentHandlers, agentVariables } = fakeAgent();
   handlers.get('agent/created')({ agent, source: 'startup' });
-  const pinned = agentVariables.get('owner_memory')();
+  const context = {};
+  const pinned = agentVariables.get('owner_memory')(context);
 
   const assemble = agentHandlers.get('system-prompt/assemble');
   const assembly = {
     sections: [
-      { name: 'persona', text: '【每轮先看 · 你的记忆】\n{{owner_memory}}\n（人设从这里开始）' },
+      { name: 'deployment:persona-prefix', text: '【每轮先看 · 你的记忆】\n{{owner_memory}}\n（人设从这里开始）' },
       { name: 'harness:identity', text: 'You are a coding agent.' },
     ],
     contexts: [],
@@ -192,67 +203,71 @@ test('注入自检认结构化 assembly：{{owner_memory}} 在 persona 段里就
     variables: { owner_memory: pinned },
   };
 
-  const returned = await assemble({}, {}, async () => assembly);
+  const returned = await assemble(assembly, context, async () => assembly);
   assert.equal(returned, assembly, '自检中间件必须原样返回 assembly');
 
   const readHealth = () => JSON.parse(fs.readFileSync(path.join(root, '.dsh-mem', 'health.json'), 'utf8'));
-  assert.equal(readHealth().injection_missing, false, '变量插值后能找到记忆首行，不该再报缺失');
+  assert.equal(readHealth().injection_missing, false, 'provider 已调用且引用段保留，不该报缺失');
 
-  // 反例一：人设压根没引用变量 → 不评判，也不许把别处写好的 false 盖回 true。
-  // （创造模式与鲸鱼娘共用一份工作区 health，这条不锁住就会互相覆盖。）
-  await assemble({}, {}, async () => ({
-    sections: [{ name: 'persona', text: '这条人设没写变量。' }],
+  // 人设没引用变量 → n/a，不改已有状态。
+  const plain = {
+    sections: [{ name: 'deployment:persona-prefix', text: '这条人设没写变量。' }],
     contexts: [],
     tools: [],
     variables: { owner_memory: pinned },
-  }));
+  };
+  await assemble(plain, {}, async () => plain);
   assert.equal(readHealth().injection_missing, false, '没引用的 assembly 不该改动 health');
 
-  // 反例二：引用了变量但变量没值（插值后仍是字面量）→ 如实报缺失。
-  await assemble({}, {}, async () => ({
-    sections: [{ name: 'persona', text: '{{owner_memory}}' }],
+  // 引用了变量但 variables 中没有注册 → 确定 missing。
+  const unregistered = {
+    sections: [{ name: 'deployment:persona-prefix', text: '{{owner_memory}}' }],
     contexts: [],
     tools: [],
     variables: {},
-  }));
+  };
+  await assemble(unregistered, {}, async () => unregistered);
   assert.equal(readHealth().injection_missing, true);
 
-  // 再回到引用且正常的 assembly → 翻回 false。
-  await assemble({}, {}, async () => assembly);
+  const nextContext = {};
+  assembly.variables.owner_memory = agentVariables.get('owner_memory')(nextContext);
+  await assemble(assembly, nextContext, async () => assembly);
   assert.equal(readHealth().injection_missing, false);
   fs.rmSync(root, { recursive: true, force: true });
 });
 
 test('健康告警按 agent 判定：没接线的 preset 不挂假警告，也不改共享 health', async () => {
-  // 2026-11-03 第三个坑：健康状态按工作区共享，但「人设有没有接线」按 agent。
-  // 创造模式的人设没有 {{owner_memory}}，它每轮都会把鲸鱼娘写好的 false 盖回 true。
   const { root, config } = workspace();
   const { host, handlers } = fakeHost();
   apply(host, config);
   const healthFile = path.join(root, '.dsh-mem', 'health.json');
   const readHealth = () => JSON.parse(fs.readFileSync(healthFile, 'utf8'));
 
-  const wired = fakeAgent();
+  const wired = fakeAgent(undefined, 'session-warn-wired', 'whalechan');
   handlers.get('agent/created')({ agent: wired.agent, source: 'startup' });
   const wiredAssemble = wired.agentHandlers.get('system-prompt/assemble');
-  const wiredPinned = wired.agentVariables.get('owner_memory')();
 
-  // 接线的人设引用了变量但没拿到值 → health 如实为 true
-  await wiredAssemble({}, {}, async () => ({
-    sections: [{ name: 'persona', text: '{{owner_memory}}' }], contexts: [], tools: [], variables: {},
-  }));
-  assert.equal(readHealth().injection_missing, true);
-
-  // 没接线的 agent：组装不评判、audit 不挂假警告、health 保持原值
-  const plain = fakeAgent();
-  handlers.get('agent/created')({ agent: plain.agent, source: 'startup' });
-  const plainAssemble = plain.agentHandlers.get('system-prompt/assemble');
-  await plainAssemble({}, {}, async () => ({
-    sections: [{ name: 'persona', text: '创造模式人设，没有变量。' }],
+  // 引用存在但变量未注册 → 当前 agent 确定 missing。
+  const broken = {
+    sections: [{ name: 'deployment:persona-prefix', text: '{{owner_memory}}' }],
     contexts: [],
     tools: [],
-    variables: { owner_memory: wiredPinned },
-  }));
+    variables: {},
+  };
+  await wiredAssemble(broken, {}, async () => broken);
+  assert.equal(readHealth().injection_missing, true);
+
+  // 没接线的 agent：n/a，不挂属于另一个 agent 的警告。
+  const plain = fakeAgent(undefined, 'session-warn-plain');
+  handlers.get('agent/created')({ agent: plain.agent, source: 'startup' });
+  const plainAssemble = plain.agentHandlers.get('system-prompt/assemble');
+  const plainInput = {
+    sections: [{ name: 'deployment:persona-prefix', text: '创造模式人设，没有变量。' }],
+    contexts: [],
+    tools: [],
+    variables: {},
+  };
+  await plainAssemble(plainInput, {}, async () => plainInput);
   assert.equal(readHealth().injection_missing, true, '没接线的 agent 不该改共享 health');
 
   const plainAudit = plain.agentRegistered.find((tool) => tool.name === 'mem_audit');
@@ -260,20 +275,18 @@ test('健康告警按 agent 判定：没接线的 preset 不挂假警告，也�
   assert.ok(!(plainResult.warnings ?? []).some((warning) => warning.includes('{{owner_memory}}')),
     '没接线的 agent 不该收到记忆警告');
 
-  // 接线且确实缺失的 agent：audit 挂一次真实警告，之后 health 归零
+  // 接线且确实缺失的 agent：只给当前 agent 挂警告，健康记录保持 missing。
   const wiredAudit = wired.agentRegistered.find((tool) => tool.name === 'mem_audit');
   const wiredResult = await wiredAudit.execute({ what: 'status' }, { agent: wired.agent });
   assert.ok((wiredResult.warnings ?? []).some((warning) => warning.includes('{{owner_memory}}')));
-  assert.equal(readHealth().injection_missing, false);
+  assert.equal(readHealth().injection_missing, true);
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-test('wiredPresets：名单里的 preset 没引用变量要报缺失（A18），名单外的不评判', async () => {
-  // 2026-11-03：只靠「这条 assembly 有没有引用变量」不够——人设被改坏、变量被删时，
-  // 没有引用就无从判断。所以用 preset 名单声明「谁本该接线」。
+test('A18：人设引用变量但装配未注册时按 not_registered 报警', async () => {
   const { root, config } = workspace();
   const { host, handlers } = fakeHost();
-  apply(host, { ...config, wiredPresets: ['whalechan'] });
+  apply(host, config);
   const healthFile = path.join(root, '.dsh-mem', 'health.json');
   const readHealth = () => JSON.parse(fs.readFileSync(healthFile, 'utf8'));
   const create = (id, preset) => {
@@ -282,36 +295,215 @@ test('wiredPresets：名单里的 preset 没引用变量要报缺失（A18），
     return fake;
   };
 
-  // 名单里且正常插值 → false
+  // 正常接线：provider 与 assemble 共用 context，引用段保留。
   const good = create('session-good', 'whalechan');
-  const goodPinned = good.agentVariables.get('owner_memory')();
-  await good.agentHandlers.get('system-prompt/assemble')({}, {}, async () => ({
-    sections: [{ name: 'persona', text: '{{owner_memory}}' }],
+  const goodContext = {};
+  const goodPinned = good.agentVariables.get('owner_memory')(goodContext);
+  const goodAssembly = {
+    sections: [{ name: 'deployment:persona-prefix', text: '{{owner_memory}}' }],
     contexts: [],
     tools: [],
     variables: { owner_memory: goodPinned },
-  }));
+  };
+  await good.agentHandlers.get('system-prompt/assemble')(
+    goodAssembly,
+    goodContext,
+    async () => goodAssembly,
+  );
   assert.equal(readHealth().injection_missing, false);
 
-  // 名单外（创造模式）不引用变量 → 不评判，health 保持 false
+  // header/preset 不参与判定；实际 persona 不引用变量就是 n/a。
   const plain = create('session-plain', 'cordis');
-  await plain.agentHandlers.get('system-prompt/assemble')({}, {}, async () => ({
-    sections: [{ name: 'persona', text: '创造模式人设，没有变量。' }],
+  const plainAssembly = {
+    sections: [{ name: 'deployment:persona-prefix', text: '创造模式人设，没有变量。' }],
     contexts: [],
     tools: [],
     variables: {},
-  }));
+  };
+  await plain.agentHandlers.get('system-prompt/assemble')(
+    plainAssembly,
+    {},
+    async () => plainAssembly,
+  );
   assert.equal(readHealth().injection_missing, false, '名单外的 preset 不该改 health');
 
-  // 名单里但人设丢了变量 → 按缺失报（A18 的原始诉求）
+  // A18 改为确定信号：引用仍在，但 variables 中没有注册。
   const broken = create('session-broken', 'whalechan');
-  await broken.agentHandlers.get('system-prompt/assemble')({}, {}, async () => ({
-    sections: [{ name: 'persona', text: '人设被改坏了，变量没了。' }],
+  const brokenAssembly = {
+    sections: [{ name: 'deployment:persona-prefix', text: '{{owner_memory}}' }],
     contexts: [],
     tools: [],
     variables: {},
-  }));
-  assert.equal(readHealth().injection_missing, true, '名单里的 preset 丢变量必须报出来');
+  };
+  await broken.agentHandlers.get('system-prompt/assemble')(
+    brokenAssembly,
+    {},
+    async () => brokenAssembly,
+  );
+  const health = readHealth();
+  assert.equal(health.injection_missing, true, '引用存在但变量未注册必须报出来');
+  assert.equal(health.injection[`${process.pid}:session-broken`].reason, 'not_registered');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('A5d：只认精确 persona 段与三种确定 missing 信号', async () => {
+  const { root, config } = workspace();
+  const { host, handlers } = fakeHost();
+  apply(host, config);
+  const healthFile = path.join(root, '.dsh-mem', 'health.json');
+  const readHealth = () => {
+    try { return JSON.parse(fs.readFileSync(healthFile, 'utf8')); } catch { return {}; }
+  };
+  const create = (id, preset = undefined) => {
+    const fake = fakeAgent(undefined, id, preset);
+    handlers.get('agent/created')({ agent: fake.agent, source: 'startup' });
+    return fake;
+  };
+
+  const plain = create('session-a5d', 'cordis');
+  const assemble = plain.agentHandlers.get('system-prompt/assemble');
+
+  // 非 persona 段落里提到变量不算接线，也不写 health。
+  const mentioned = {
+    sections: [{ name: 'agent-instructions', text: '说明文档里顺嘴提到 {{owner_memory}}，不代表这条人设接线。' }],
+    contexts: [],
+    tools: [],
+    variables: {},
+  };
+  await assemble(mentioned, {}, async () => mentioned);
+  assert.equal(fs.existsSync(healthFile), false);
+
+  // 精确 persona 引用存在但变量未注册 → not_registered。
+  const unregistered = {
+    sections: [{ name: 'deployment:persona-prefix', text: '【记忆】\n{{owner_memory}}' }],
+    contexts: [],
+    tools: [],
+    variables: {},
+  };
+  await assemble(unregistered, {}, async () => unregistered);
+  assert.equal(readHealth().injection[`${process.pid}:session-a5d`].reason, 'not_registered');
+
+  // 同一 agent 改成 interpolate:false → 仍是确定 missing，并覆盖 reason。
+  const interpolationOff = {
+    sections: [{
+      name: 'deployment:persona-prefix',
+      text: '{{owner_memory}}',
+      interpolate: false,
+    }],
+    contexts: [],
+    tools: [],
+    variables: { owner_memory: '【长期记忆】' },
+  };
+  await assemble(interpolationOff, {}, async () => interpolationOff);
+  const health = readHealth();
+  assert.equal(health.injection_missing, true);
+  assert.equal(health.injection[`${process.pid}:session-a5d`].reason, 'interpolate_off');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('同工作区主 agent 正常、子代理无人设：连续五轮不互相污染', async () => {
+  const { root, config } = workspace();
+  const { host, handlers } = fakeHost();
+  apply(host, config);
+  const unique = `${process.pid}-${Date.now()}`;
+  const main = fakeAgent(undefined, `session-main-${unique}`, 'whalechan');
+  const child = fakeAgent(undefined, `session-child-${unique}`, 'cordis');
+  handlers.get('agent/created')({ agent: main.agent, source: 'startup' });
+  handlers.get('agent/created')({ agent: child.agent, source: 'subagent' });
+  const mainAssemble = main.agentHandlers.get('system-prompt/assemble');
+  const childAssemble = child.agentHandlers.get('system-prompt/assemble');
+  const mainPersona = { name: 'deployment:persona-prefix', text: '{{owner_memory}}' };
+  const childPersona = { name: 'deployment:persona-prefix', text: '子代理无人设记忆引用。' };
+
+  for (let round = 0; round < 5; round += 1) {
+    const mainContext = {};
+    const mainPinned = main.agentVariables.get('owner_memory')(mainContext);
+    const mainInput = {
+      sections: [mainPersona],
+      contexts: [],
+      tools: [],
+      variables: { owner_memory: mainPinned },
+    };
+    await mainAssemble(mainInput, mainContext, async () => mainInput);
+
+    const childContext = {};
+    const childPinned = child.agentVariables.get('owner_memory')(childContext);
+    const childInput = {
+      sections: [childPersona],
+      contexts: [],
+      tools: [],
+      variables: { owner_memory: childPinned },
+    };
+    await childAssemble(childInput, childContext, async () => childInput);
+  }
+
+  const health = JSON.parse(fs.readFileSync(path.join(root, '.dsh-mem', 'health.json'), 'utf8'));
+  const mainKey = `${process.pid}:${main.agent.id}`;
+  const childKey = `${process.pid}:${child.agent.id}`;
+  assert.equal(health.injection[mainKey].verdict, 'ok');
+  assert.equal(health.injection[childKey], undefined, 'n/a 子代理不应写 per-agent 明细');
+  assert.equal(health.injection_missing, false);
+
+  const probeFile = path.join(os.tmpdir(), 'dsh-owner-memory', 'load-probe.log');
+  const probeText = fs.existsSync(probeFile) ? fs.readFileSync(probeFile, 'utf8') : '';
+  const ownVerdicts = probeText.split(/\r?\n/u)
+    .filter((line) => line.includes(`agent=${main.agent.id}`));
+  assert.equal(ownVerdicts.some((line) => line.includes('verdict=missing')), false);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('header=cordis 但实际 persona 无变量：n/a 且 health mtime 不变', async () => {
+  const { root, config } = workspace();
+  const { host, handlers } = fakeHost();
+  apply(host, config);
+  const plain = fakeAgent(undefined, `session-cordis-na-${process.pid}`, 'cordis');
+  handlers.get('agent/created')({ agent: plain.agent, source: 'startup' });
+  const healthFile = path.join(root, '.dsh-mem', 'health.json');
+  fs.mkdirSync(path.dirname(healthFile), { recursive: true });
+  fs.writeFileSync(healthFile, `${JSON.stringify({ injection_missing: false }, null, 2)}\n`);
+  const before = fs.statSync(healthFile).mtimeMs;
+  const input = {
+    sections: [{ name: 'deployment:persona-prefix', text: '创造模式，无记忆变量。' }],
+    contexts: [],
+    tools: [],
+    variables: {},
+  };
+  await plain.agentHandlers.get('system-prompt/assemble')(input, {}, async () => input);
+  assert.equal(fs.statSync(healthFile).mtimeMs, before);
+  assert.deepEqual(JSON.parse(fs.readFileSync(healthFile, 'utf8')), { injection_missing: false });
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('同 agent 后四轮 provider 未调用：相同 personaHash 以 cached 保持 ok', async () => {
+  const { root, config } = workspace();
+  const { host, handlers } = fakeHost();
+  apply(host, config);
+  const current = fakeAgent(undefined, `session-cached-${process.pid}`, 'whalechan');
+  handlers.get('agent/created')({ agent: current.agent, source: 'startup' });
+  const assemble = current.agentHandlers.get('system-prompt/assemble');
+  const provider = current.agentVariables.get('owner_memory');
+  const persona = { name: 'deployment:persona-prefix', text: '{{owner_memory}}' };
+  const context = {};
+  const pinned = provider(context);
+  const input = {
+    sections: [persona], contexts: [], tools: [], variables: { owner_memory: pinned },
+  };
+  await assemble(input, context, async () => input);
+
+  const healthFile = path.join(root, '.dsh-mem', 'health.json');
+  const key = `${process.pid}:${current.agent.id}`;
+  assert.equal(JSON.parse(fs.readFileSync(healthFile, 'utf8')).injection[key].reason, 'provider_observed');
+  const head = pinned.split(/\r?\n/u)[0];
+  for (let round = 2; round <= 5; round += 1) {
+    const output = {
+      ...input,
+      sections: [{ name: 'deployment:persona-prefix', text: `人设\n${head}\n第 ${round} 轮` }],
+    };
+    await assemble(input, {}, async () => output);
+    const entry = JSON.parse(fs.readFileSync(healthFile, 'utf8')).injection[key];
+    assert.equal(entry.verdict, 'ok');
+    assert.equal(entry.reason, 'cached');
+  }
   fs.rmSync(root, { recursive: true, force: true });
 });
 

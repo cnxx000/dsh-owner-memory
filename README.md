@@ -26,33 +26,64 @@ L0 通过 persona 的 `{{owner_memory}}` 变量进系统提示；L2 靠工具调
 | `mem_recall` | 读 | 按需召回，返回带回执编号 |
 | `mem_audit` | 读 | 审计：召回回执 / 六类体检 / 键时间线 / id 引用链 / 开关状态 |
 
+**可选参数**（2026-11-04 新增）：
+
+| 参数 | 用在 | 说明 |
+|---|---|---|
+| `aliases` + `aliasQuote` | `mem_fact` / `mem_note` | 给条目挂「俗称」（1–3 条）。**只生成提案**，不会立刻影响召回；主人审过之后才由 `scripts/apply-aliases.mjs` 落成 `kind=alias` 事件 |
+| `replaces` | `mem_note` | 声明本条取代哪些旧条目（同 kind、不含 `fact`、目标须 active）。它不是「引用」：不给被取代方加分，被取代方变 `superseded`，撤销新条时自动复活 |
+| `ownerQuote` | `mem_fix` | 撤一条 `rule` 时必须带主人的原话（≤200 字），否则 `E_RULE_RETRACT_FORBIDDEN` |
+| `clearKey` | `mem_fix` | 当一次撤销会让某个键失去当前值、且没有更早的值可回退时，必须显式声明要清空哪个键 |
+
+## 别名与俗称
+
+两条互补的路，管的是不同的失败模式：
+
+| | 文件 / 字段 | 管什么 | 怎么生效 |
+|---|---|---|---|
+| 别名表 | `.dsh-mem/aliases.json`（真相源，手工维护） | 「人话 → 代码标识符」，例如 `养鱼的插件 → dsh-fish` | 查询命中短语后，把目标词的 bigram 以 0.8 折并入召回词元 |
+| 俗称 | 事件上的 `aliases` 字段 / 内部 `kind=alias` 事件 | 同一条目在自然语言里的别叫法 | 只对**已批准**的俗称生效：查询整句包含该短语时加 `min(8, 2L)` |
+
+俗称的完整流程：写入时带 `aliases` + `aliasQuote` → 只进 `.dsh-mem/alias-proposals.json`（每会话最多 3 条，失败只给 warning、正文照常写）→ 主人审 → `node scripts/apply-aliases.mjs` 落盘。挖历史 miss 用 `node scripts/mine-aliases.mjs`，它按「换说法 / 空召回 / 只撞旧条目 / 弱命中」四类信号产提案。
+
+`.dsh-mem/` 里还有三种**内部事件**，不注册成工具、不进召回候选：`supersede`（历史迁移用）、`alias`（俗称）、`confirm`（去重命中时的确认，derive 累计成 `confirmCount`）。
+
 ## L0 预算（硬约束）
 
 总预算 1200 字符，分段配额合计恰好 1200：
 
 | 段 | 条数 | 字符 | 溢出时 |
 |---|---|---|---|
-| 红线 `rule` | 6 | 260 | 按 `weight` 取前 6，其余进 `mem_recall(kinds=['rule'])` 强制通道 |
+| 红线 `rule` | 6 | 300 | 按 `weight` 取前 6，其余进 `mem_recall(kinds=['rule'])` 强制通道 |
 | 在办 `todo` | 5 | 280 | 保留最近的 |
-| 事实 `fact` | 8 | 380 | 低分先出局（打分见下） |
+| 事实 `fact` | 8 | 340 | 低分先出局（打分见下） |
 | 决策 `decision` | 3 | 120 | 保留最近的 |
 | 标题 + 尾注 | — | 160 | — |
 
-- 单条正文超过 **32 字符**会被截断并补 `…`，id 一定保留；
+- 事实行有两种：带 `headline` 的渲染成 `[主人|项目] <日期> <对象简称>.<方面段>：<headline>`（结论可见、不带 id）；不带的沿用旧格式 `[项目] YY-MM-DD <正文前 32 字>…(<id>)`；
 - 淘汰顺序 **决策 → 事实 → 在办**，红线永不缺省；真顶穿时红线正文会被压到 16 / 8 字符（记 `rules_truncated_hard`）；
-- 事实段不套召回公式：`score = 0.8 + 0.2×weight + 0.2(30 天内) + 0.3(pin)`，同分按 `confirmCount`、再按 key 字典序兜底（保证同一份库每轮渲染结果稳定，不打穿 prompt cache）。
+- 事实段不套召回公式：`score = 0.8 + 0.2×weight + 0.2(30 天内) + 0.3(pin)`，同分按 `confirmCount` 降序、`ts` 升序、`id` 升序兜底（保证同一份库每轮渲染结果稳定，不打穿 prompt cache）；
+- **`fact_overflow` 记两类键**：排名第 9 起的，以及前 8 名里因为字数/总预算没被渲染出来的——后者以前是静默蒸发的。
 
 ## 健康指标
 
-`mem_audit(what="health")` 里三个和注入有关的字段：
+`mem_audit(what="health")` 里的关键字段：
 
 | 字段 | 什么时候为 `true` | 该做什么 |
 |---|---|---|
 | `rules_overflow` | 有红线被挤出前 6，或红线全文字符超预算，或任一条超 32 字 | 看 L0 尾注分辨是「溢出」还是「截断」；前者先 `mem_recall(kinds=['rule'])` |
 | `rules_truncated_hard` | 红线正文被压到 16 / 8 字符 | 红线写太长了，删/合并或把细节挪进 `note` |
-| `injection_missing` | 最终提示里找不到 L0 首行 | 检查 persona 有没有 `{{owner_memory}}` |
+| `injection_missing` | 当前 agent 的注入判定为 `missing`（人设引用了变量，但变量没注册、或引用段 `interpolate=false`、或 provider 抛错） | 先看 `mem_audit(what="health")` 里的 per-agent 明细与 `reason`；`deferred` 不算缺失 |
+| `vec_index_stale` | `events.jsonl` 与向量索引版本不一致 | 当前轮自动退回纯字面；后台重建成功后下一轮恢复（向量默认关闭，一般不会出现） |
+| `vector_disabled` | 模型缺失、加载失败或启动超时 | 当前轮自动退回纯字面；按记录的原因修模型安装（向量默认关闭） |
+| `fact_overflow` | 有事实键没进 L0（第 9 名起，或前 8 名被字数挤掉） | 给这些键补 `headline` 或降权；值本身仍可用 `mem_recall` 取 |
+| `fact_headline_missing` | 入选 L0 但没写 `headline` 的键 | 用同一个 key 重写一条带 `headline` 的事实 |
+| `fact_label_long` | 标签 + headline 超 26 字 | 把 headline 改短（18 字以内） |
+| `pit_symptom_missing` | active 且带「坑」tag，但既没症状词也没问法的条目 | 补 `symptom` / `ask`，否则坑类索引里不会提示到它 |
+| `pit_overflow` | 坑类门铃行里没放下的类别词 | 只影响提示宽度，不影响召回；需要时改 `.dsh-mem/pit-categories.txt` |
+| `ablation` | 当前生效的消融档位（`none` / `no-pit` / `off`） | 只在评测时由 `.dsh-mem/flags/ablation` 控制，正常应为 `none` |
 
-这三个指标**每轮重算重写**，不是历史累积值；尾注与指标口径必须一致，不一致就是落盘链路断了。
+前三个注入/L0 指标**每轮重算重写**，不是历史累积值；尾注与指标口径必须一致，不一致就是落盘链路断了。
 
 ## 安装
 
@@ -92,7 +123,36 @@ L0 通过 persona 的 `{{owner_memory}}` 变量进系统提示；L2 靠工具调
 | `injectMaxChars` | `1200` | L0 硬上限 |
 | `recallLimit` | `4` | 单次召回默认条数 |
 | `recallMaxChars` | `800` | 单次召回字符上限 |
+| `symptomsInRecall` | `true` | 默认开启，把坑条目的症状词和问法并入召回检索文本；关闭时检索行为与旧版一致 |
+| `vector.enabled` | `false` | 是否启用向量第二信号。**默认关闭**：2026-11-04 实测 C 组 0/4、p95 569ms，未达止损线；改这里可复测，评估脚本 `scripts/vec-eval.mjs` |
+| `vector.floor` | `null` | 手工覆盖余弦 floor；`null` 使用索引里记的 query-doc p90 |
+| `vector.beta` | `0.5` | 向量融合系数 |
+| `vector.modelDir` | `~/.dsh/owner-memory/models/bge-small-zh-v1.5@75c43b0` | 固定模型目录 |
+| `aliasesPath` | `.dsh-mem/aliases.json` | 别名表（真相源，手工维护） |
+| `lockMaxWaitMs` | `5000` | 跨进程锁的最大等待；满负载下 2000 会让 40 并发写超时，故上调 |
 | `foldAtLines` | `20000` | 事件流到多少行触发折叠（折叠前自动快照） |
+
+### 消融开关（只用于评测）
+
+`.dsh-mem/flags/ablation` 里写 `no-pit` 会跳过 L0 的坑类门铃行，写 `off` 会让整块长期记忆不注入；文件不存在或内容无法识别时按正常渲染。当前档位记在 `health.ablation`。做完评测记得删掉这个文件。
+
+## 坑类记录：症状词与问法
+
+坑类 note（`tags` 含「坑」）可以带两组检索辅助：
+
+- `symptom`：1–2 个症状词，每个 2–8 字，用来渲染 L0 的「踩过 N 类坑」门铃；
+- `ask`：1–3 句用户口吻问法，每句 6–40 字，用于 doc2query 扩写。
+
+两者都存成内部 `kind=symptom` 事件（`refs` 指向那条 note，`symptoms` / `asks` 二选一或并存），**不进 L0 正文、不单独成为召回条目**。`symptomsInRecall=true` 时它们并入该条目的检索文本；关闭则检索行为与旧版一致。
+
+写的时候顺手给：`mem_note(kind="note", tags=["坑"], symptom=["证书报错"], ask=["抽帧报证书错怎么办"])`。存量条目补录要走 `src=review` 的一次性事件，不要用 revise（revise 的语义是「当初记错了」）。
+
+## 向量性能实测
+
+2026-11-04 在 Windows / 纯 Node WASM / `numThreads=1` 下，20 次热查询实测
+`p50=510.9ms`、`p95=534.1ms`；完整 47 题评测为 `p95=597.7ms`。当前预算是
+`p95 ≤400ms`，因此这份实现尚未达标，不能仅凭功能完成就默认合入。worker 在活动请求
+期间保持进程，完成后 `unref()`；脚本显式 `dispose()`，宿主空闲 5 分钟自动回收。
 
 ## 开发
 

@@ -19,7 +19,43 @@ function workspace(t) {
   return resolveConfig({ workspace: root });
 }
 
-test('A22：同一句 mem_note 三次只写一行并累计两次确认', async (t) => {
+test('mem_fact 拒绝未来验证时间，并持久化有效 verifiedAt', async (t) => {
+  const config = workspace(t);
+  const eventFile = path.join(config.localRoot, 'events.jsonl');
+  const future = new Date(Date.now() + 5 * 60_000).toISOString();
+
+  await assert.rejects(
+    memFact(config, {
+      key: '测试.未来验证',
+      text: '这条事实不应写入。',
+      verifiedAt: future,
+    }, { sessionId: 'verified-future' }),
+    (error) => error.code === 'E_FUTURE_TIME' && /验证时间不能晚于现在/u.test(error.message),
+  );
+  assert.equal(fs.existsSync(eventFile), false);
+
+  const past = '2026-01-02T03:04:05+08:00';
+  const explicit = await memFact(config, {
+    key: '测试.过去验证',
+    text: '这条事实使用显式验证时间。',
+    verifiedAt: past,
+  }, { sessionId: 'verified-past' });
+  const implicit = await memFact(config, {
+    key: '测试.默认验证',
+    text: '这条事实使用事件时间。',
+  }, { sessionId: 'verified-default' });
+
+  const events = readEvents(config.localRoot).events;
+  const state = readJson(path.join(config.localRoot, 'state.json'));
+  const explicitEvent = events.find((event) => event.id === explicit.id);
+  const implicitEvent = events.find((event) => event.id === implicit.id);
+  assert.equal(explicitEvent.verifiedAt, past);
+  assert.equal(state.byId[explicit.id].verifiedAt, past);
+  assert.equal(implicitEvent.verifiedAt, implicitEvent.ts);
+  assert.equal(state.byId[implicit.id].verifiedAt, implicitEvent.ts);
+});
+
+test('A22：同一句 mem_note 三次只写一条正文并累计两次确认', async (t) => {
   const config = workspace(t);
   const args = { kind: 'note', text: '沙箱写入失败时先检查工作区权限。' };
   const first = await memNote(config, args, { sessionId: 'a22-1' });
@@ -28,7 +64,8 @@ test('A22：同一句 mem_note 三次只写一行并累计两次确认', async (
   const events = readEvents(config.localRoot).events;
   const state = readJson(path.join(config.localRoot, 'state.json'));
 
-  assert.equal(events.length, 1);
+  assert.equal(events.filter((event) => event.kind !== 'confirm').length, 1);
+  assert.equal(events.filter((event) => event.kind === 'confirm').length, 2);
   assert.equal(second.duplicate, true);
   assert.equal(third.duplicate, true);
   assert.equal(second.id, first.id);

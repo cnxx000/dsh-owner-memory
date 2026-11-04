@@ -59,15 +59,6 @@ function mixedEvents() {
   return events;
 }
 
-function rebuildableBytes(raw) {
-  const state = JSON.parse(raw);
-  // A1 明确豁免这三个只存在于派生层、无法从事件流重建的字段。
-  delete state.confirmCount;
-  delete state.lastSeenAt;
-  delete state.carriedSessions;
-  return `${JSON.stringify(state, null, 2)}\n`;
-}
-
 test('A1：删除派生品后 state.json 可逐字节一致重建', async (t) => {
   const root = workspace(t);
   initRoot(root);
@@ -83,7 +74,7 @@ test('A1：删除派生品后 state.json 可逐字节一致重建', async (t) =>
   await rebuildState(root);
   const after = fs.readFileSync(path.join(root, 'state.json'), 'utf8');
 
-  assert.equal(rebuildableBytes(after), rebuildableBytes(before));
+  assert.equal(after, before);
 });
 
 test('坏 JSON 使快路径失效一次，随后原始字节 sourceHash 恢复快路径', async (t) => {

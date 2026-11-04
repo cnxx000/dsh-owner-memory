@@ -4,6 +4,7 @@ import {
   assemblyReferencesVariable,
   renderAssemblyText,
   renderPinned,
+  selectFacts,
   selectRules,
   truncateLine,
   verifyInjection,
@@ -48,7 +49,11 @@ test('A4：200 条候选仍不超过 1200 字符且保留六条红线', (t) => {
   assert.ok(pinned.length <= 1200);
   assert.equal(selectedRules.length, 6);
   for (const rule of selectedRules) assert.ok(pinned.includes(rule.id));
-  t.diagnostic(`A4 pinned chars=${pinned.length}`);
+  const renderedFacts = pinned.split('\n').filter((line) => (
+    line.startsWith('[主人]') || line.startsWith('[项目]')
+  ));
+  assert.equal(renderedFacts.length, 7, '标题增长后不得从事实段额外淘汰条目');
+  t.diagnostic(`A4 pinned chars=${pinned.length} facts=${renderedFacts.length}`);
 });
 
 test('A5：高分事实不挤红线，红线超配额写 health', () => {
@@ -76,10 +81,75 @@ test('A5：高分事实不挤红线，红线超配额写 health', () => {
   assert.equal(health.rules_overflow, true);
 });
 
-test('A18：提示词首行特征串可检出注入缺失', () => {
-  const pinned = '## 关于主人（截至 2026-11-02）\n> 更多细节用 mem_recall 查。';
+test('A5b：5 条红线 + 完整 id 落在 300 内，不截断也不写 overflow', (t) => {
+  // 2026-11-04 实测形状：真实库里那 5 条红线，正文 21–30 字，id 13 字符。
+  // 改配额前这里会误报 rules_overflow（304 > 260），尾注每轮喊「红线已截断」。
+  const rules = [
+    ['m_mw1iqtj4_9c94', '2026-11-04T10:49:55.456+08:00', '让我去问就问到双方都拍板、无需再调整才算完'],
+    ['m_mw074084_2ebf', '2026-11-03T12:36:29.092+08:00', '任何 .md 改完必须跑 lint-md 到 exit=0'],
+    ['m_mw07406r_e503', '2026-11-03T12:36:29.043+08:00', '顶层 inject 禁写 systemPrompt（静默坏）'],
+    ['m_mw0fycaa_ffe2', '2026-11-03T16:44:01.330+08:00', '做插件前先提醒主人切创造模式（preset cordis）'],
+    ['m_mw07409q_1c5c', '2026-11-03T12:36:29.150+08:00', '红线写成 32 字内的一句话命令，解释另存 note'],
+  ];
+  const state = emptyState();
+  for (const [id, ts, text] of rules) add(state, { id, ts, kind: 'rule', text, weight: 5 });
+
+  const health = {};
+  const pinned = renderPinned(state, { now: new Date('2026-11-04T03:00:00Z'), health });
+  const rendered = pinned.split('\n').filter((line) => line.startsWith('[红线]'));
+
+  assert.equal(rendered.length, 5, '5 条红线一条都不能少');
+  for (const [id] of rules) assert.ok(pinned.includes(id), `完整 id 必须保留：${id}`);
+  for (const line of rendered) {
+    assert.ok(!line.includes('…'), `正文没超 32 字时不该截断：${line}`);
+    assert.match(line, /^\[红线\] \d{2}-\d{2}-\d{2} /u, `日期必须是 YY-MM-DD：${line}`);
+  }
+  assert.ok(rendered.join('\n').length <= 300, '5 条红线必须落在 300 字符配额内');
+  assert.ok(pinned.length <= 1200);
+  assert.equal(health.rules_overflow, false);
+  assert.equal(health.rules_truncated_hard, false);
+  t.diagnostic(`A5b rules chars=${rendered.join('\n').length} pinned chars=${pinned.length}`);
+});
+
+test('A5c：6 条全满 32 字红线仍溢出，配额不许再调大', (t) => {
+  // 6 条约 372 字符，300 装不下——溢出靠 §6.3 强制通道，不要靠调大配额。
+  const state = emptyState();
+  for (let index = 0; index < 6; index += 1) {
+    add(state, item(index, 'rule', {
+      id: `m_mw0740${index}q_${index}c5c`,
+      text: '必须先确认并保留完整审计证据再动手改动任何配置文件和代码'.slice(0, 32),
+      weight: 5,
+    }));
+  }
+  const health = {};
+  const pinned = renderPinned(state, { now: new Date('2026-11-04T03:00:00Z'), health });
+
+  assert.equal(health.rules_overflow, true);
+  assert.ok(pinned.length <= 1200);
+  assert.equal(pinned.split('\n').filter((line) => line.startsWith('[红线]')).length, 6);
+  t.diagnostic(`A5c 6 条满额红线 → rules_overflow=${health.rules_overflow}`);
+});
+
+test('H1/H2/H3：新标题、事实主体标签与注入自检均正确，且条数和总预算不变', (t) => {
+  const state = emptyState();
+  add(state, item(1, 'fact', { key: '主人.编辑器偏好', text: '主人偏好使用当前编辑器。' }));
+  add(state, item(2, 'fact', { key: 'dsh-fish.运行状态', text: 'dsh-fish 当前正常运行。' }));
+  const pinned = renderPinned(state, { now: new Date('2026-11-02T00:00:00Z'), health: {} });
+  assert.equal(
+    pinned.split('\n')[0],
+    '## 长期记忆（截至 2026-11-02；记的是主人和主人的项目，不含鲸鱼娘自己）',
+  );
+  const factLines = pinned.split('\n').filter((line) => (
+    line.startsWith('[主人]') || line.startsWith('[项目]')
+  ));
+  assert.equal(factLines.length, selectFacts(state, { now: new Date('2026-11-02T00:00:00Z') }).length);
+  assert.ok(factLines.some((line) => line.startsWith('[主人]') && line.includes('m_l0_0001')));
+  assert.ok(factLines.some((line) => line.startsWith('[项目]') && line.includes('m_l0_0002')));
+  assert.equal(pinned.includes('[事实]'), false);
   assert.deepEqual(verifyInjection(`persona\n${pinned}\nend`, pinned), { ok: true, missing: false });
   assert.deepEqual(verifyInjection('persona without owner memory', pinned), { ok: false, missing: true });
+  assert.ok(pinned.length <= 1200);
+  t.diagnostic(`H3 pinned chars=${pinned.length} facts=${factLines.length}`);
 });
 
 test('同一 state 两次渲染逐字节相同', () => {
@@ -143,7 +213,7 @@ test('50 组随机 state 始终安全且确定性渲染', () => {
     });
     const second = renderPinned(state, { now, health: {} });
     assert.ok(first.length <= 1200);
-    assert.ok(first.startsWith('## 关于主人（截至 '));
+    assert.ok(first.startsWith('## 长期记忆（截至 '));
     assert.equal(
       first.split('\n').filter((line) => line.startsWith('[红线]')).length,
       selectRules(state).selected.length,
@@ -153,7 +223,7 @@ test('50 组随机 state 始终安全且确定性渲染', () => {
 });
 
 test('renderAssemblyText：结构化 assembly 按宿主的 {{变量}} 规则插值', () => {
-  const pinned = '## 关于主人（截至 2026-11-03）\n[红线] 不许把密钥写进记忆。';
+  const pinned = '## 长期记忆（截至 2026-11-03；记的是主人和主人的项目，不含鲸鱼娘自己）\n[红线] 不许把密钥写进记忆。';
   const assembly = {
     sections: [
       { name: 'persona', text: `【每轮先看 · 你的记忆】\n{{owner_memory}}\n（下面是人设）` },
@@ -176,7 +246,10 @@ test('renderAssemblyText：未知变量保持字面量，自检判失败', () =>
     variables: {},
   });
   assert.equal(text, '{{owner_memory}}');
-  assert.equal(verifyInjection(text, '## 关于主人（截至 2026-11-03）').missing, true);
+  assert.equal(
+    verifyInjection(text, '## 长期记忆（截至 2026-11-03；记的是主人和主人的项目，不含鲸鱼娘自己）').missing,
+    true,
+  );
 });
 
 test('renderAssemblyText：interpolate:false 不插值，字符串原样返回', () => {
@@ -204,6 +277,36 @@ test('assemblyReferencesVariable：只认真的 {{变量}} 引用', () => {
     sections: [{ name: 'persona', text: '{{other_memory}}' }],
   }, 'owner_memory'), false, '别的变量不算');
   assert.equal(assemblyReferencesVariable(null, 'owner_memory'), false);
+});
+
+test('assemblyReferencesVariable：{ section } 只认人设段，文档里提到变量不算接线', () => {
+  // 2026-11-04 真机：创造模式的 assembly 里有一段非 persona 文本带着 `{{owner_memory}}`，
+  // 被判成「引用了却没进去」，每轮把 injection_missing 写成 true。
+  const assembly = {
+    sections: [
+      { name: 'agent-instructions', text: '工作区说明里顺嘴提到 {{owner_memory}}，不代表这条人设接线了。' },
+      { name: 'harness:identity', text: 'You are a coding agent.' },
+    ],
+    contexts: [{ name: 'runtime', text: '{{owner_memory}} 只出现在说明里' }],
+  };
+  assert.equal(assemblyReferencesVariable(assembly, 'owner_memory'), true, '不带过滤时仍按「提到」处理');
+  assert.equal(assemblyReferencesVariable(assembly, 'owner_memory', { section: 'persona' }), false);
+
+  const wired = {
+    sections: [
+      { name: 'persona', text: '【记忆】\n{{owner_memory}}' },
+      { name: 'agent-instructions', text: '无关段落' },
+    ],
+    contexts: [],
+  };
+  assert.equal(assemblyReferencesVariable(wired, 'owner_memory', { section: 'persona' }), true);
+  assert.equal(assemblyReferencesVariable({
+    sections: [{ name: 'persona-prefix', text: '{{owner_memory}}' }],
+  }, 'owner_memory', { section: 'persona' }), true, '段名带 persona 后缀也算');
+  assert.equal(assemblyReferencesVariable({
+    contexts: [{ name: 'persona', text: '{{owner_memory}}' }],
+    sections: [],
+  }, 'owner_memory', { section: 'persona' }), true, 'contexts 里的 persona 段也认');
 });
 
 

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { DEFAULTS, rootForScope } from './config.js';
 import { deriveState } from './derive.js';
 import { generateId, readArchiveEvents } from './storage/event-log.js';
-import { atomicWrite, initRoot, readJson, updateHealth } from './storage/files.js';
+import { atomicWrite, initRoot, updateHealth } from './storage/files.js';
 import { withLock } from './storage/lock.js';
 import { validateEvent } from './schema.js';
 
@@ -54,20 +54,35 @@ export async function foldEvents(config, options = {}) {
     const eventFile = path.join(root, 'events.jsonl');
     const originalBytes = fs.readFileSync(eventFile);
     const original = parsedLines(originalBytes);
-    const persistedState = readJson(path.join(root, 'state.json'), null);
     const beforeEvents = [
       ...readArchiveEvents(root).events,
       ...original.map(({ event }) => event),
     ].sort((left, right) => Date.parse(left.ts) - Date.parse(right.ts) || left.id.localeCompare(right.id));
     const currentState = deriveState(beforeEvents);
-    for (const field of ['confirmCount', 'lastSeenAt', 'carriedSessions']) {
-      if (persistedState?.[field] !== undefined) currentState[field] = structuredClone(persistedState[field]);
+    const foldableIds = new Set(Object.values(currentState.byId ?? {})
+      .filter((event) => {
+        const status = currentState.status?.[event.id]?.status ?? 'active';
+        const oldEnough = now.getTime() - Date.parse(event.ts) > retentionMs;
+        return ['superseded', 'revised', 'retracted', 'closed'].includes(status) && oldEnough;
+      })
+      .map((event) => event.id));
+    const closureIds = new Set(original
+      .filter(({ event }) => foldableIds.has(event.id))
+      .map(({ event }) => event.id));
+    let closureChanged = true;
+    while (closureChanged) {
+      closureChanged = false;
+      for (const { event } of original) {
+        if (
+          !['alias', 'confirm', 'symptom'].includes(event.kind)
+          || closureIds.has(event.id)
+          || !event.refs?.some((id) => foldableIds.has(id) || closureIds.has(id))
+        ) continue;
+        closureIds.add(event.id);
+        closureChanged = true;
+      }
     }
-    const moved = original.filter(({ event }) => {
-      const status = currentState.status?.[event.id]?.status ?? 'active';
-      const oldEnough = now.getTime() - Date.parse(event.ts) > retentionMs;
-      return ['superseded', 'revised', 'retracted', 'closed'].includes(status) && oldEnough;
-    });
+    const moved = original.filter(({ event }) => closureIds.has(event.id));
     if (moved.length === 0) return;
 
     const archiveRoot = path.join(root, 'archive');
@@ -124,9 +139,6 @@ export async function foldEvents(config, options = {}) {
       ));
       const meta = sourceHash(finalBytes);
       const nextState = deriveState(complete, { sourceHash: meta });
-      for (const field of ['confirmCount', 'lastSeenAt', 'carriedSessions']) {
-        if (currentState?.[field] !== undefined) nextState[field] = structuredClone(currentState[field]);
-      }
       atomicWrite(path.join(root, 'state.json'), `${JSON.stringify(nextState, null, 2)}\n`);
       atomicWrite(path.join(root, 'events.jsonl.meta'), `${JSON.stringify(meta)}\n`);
       result = {

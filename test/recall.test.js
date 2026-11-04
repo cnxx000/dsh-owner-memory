@@ -103,6 +103,22 @@ test('A11：完全无关查询诚实返回零条', () => {
   assert.deepEqual(recall(state, index, '火星土豆种植计划', { now: NOW }).items, []);
 });
 
+test('H2：主体词不制造伪召回，主人 key 的具体方面仍可命中', (t) => {
+  const { state, index } = prepared([
+    event('m_owner_schedule', 'fact', '通常凌晨一点休息。', { key: '主人.作息' }),
+    event('m_owner_editor', 'fact', '偏好使用当前编辑器。', { key: '主人.编辑器偏好' }),
+    event('m_whale_note', 'note', '鲸鱼娘会先读取长期记忆。'),
+  ]);
+  const birthday = recall(state, index, '主人生日', { now: NOW });
+  const whaleBirthday = recall(state, index, '鲸鱼娘生日', { now: NOW });
+  const schedule = recall(state, index, '主人作息', { now: NOW });
+
+  assert.deepEqual(birthday.items, []);
+  assert.deepEqual(whaleBirthday.items, []);
+  assert.deepEqual(schedule.items.map(({ id }) => id), ['m_owner_schedule']);
+  t.diagnostic(`主人生日=${birthday.items.length} 条；主人作息=${schedule.items.length} 条`);
+});
+
 function ruleSeatFixture() {
   const events = [];
   for (let index = 1; index <= 8; index += 1) {

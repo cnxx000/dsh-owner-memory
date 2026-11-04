@@ -1,8 +1,6 @@
-import path from 'node:path';
 import { DEFAULTS } from '../config.js';
-import { MemoryError } from '../schema.js';
-import { atomicWrite, readJson } from '../storage/files.js';
-import { withLock } from '../storage/lock.js';
+import { confirmText, MemoryError } from '../schema.js';
+import { appendEventToRoot } from '../storage/event-log.js';
 import { tokensOf } from '../tokenize.js';
 
 function tokenSet(text) {
@@ -43,10 +41,14 @@ export function inspectDedup(state, input, options = {}) {
   const windowMs = options.windowMs ?? DEFAULTS.dedupWindowMs;
   const duplicateThreshold = options.duplicateThreshold ?? DEFAULTS.dedupDuplicateThreshold;
   const warningThreshold = options.warningThreshold ?? DEFAULTS.dedupWarningThreshold;
+  const replacedIds = new Set(input.replaces ?? []);
   const candidates = Object.values(state?.byId ?? {})
     .filter((event) => {
       const age = nowMs - Date.parse(event.ts);
-      return event.kind === input.kind && age >= 0 && age <= windowMs;
+      return event.kind === input.kind
+        && !replacedIds.has(event.id)
+        && age >= 0
+        && age <= windowMs;
     })
     .map((event) => ({
       event,
@@ -86,19 +88,24 @@ export function inspectDedup(state, input, options = {}) {
 
 export async function recordDuplicate(root, id, now = new Date(), options = {}) {
   let count;
-  await withLock(root, 'dedup-confirm', () => {
-    const file = path.join(root, 'state.json');
-    const state = readJson(file, null);
-    if (!state?.byId?.[id]) {
-      throw new MemoryError('E_REF_NOT_FOUND', `去重候选已不存在：${id}`);
-    }
-    state.confirmCount = { ...(state.confirmCount ?? {}) };
-    state.lastSeenAt = { ...(state.lastSeenAt ?? {}) };
-    count = (state.confirmCount[id] ?? 0) + 1;
-    state.confirmCount[id] = count;
-    state.lastSeenAt[id] = new Date(now).toISOString();
-    // 确认次数不是事件事实；保留在派生层，接受全量重建后归零的既定取舍。
-    atomicWrite(file, `${JSON.stringify(state, null, 2)}\n`);
-  }, options);
+  await appendEventToRoot(root, {
+    ts: new Date(now).toISOString(),
+    kind: 'confirm',
+    text: confirmText(id),
+    refs: [id],
+    scope: options.confirmScope ?? 'local',
+    src: 'agent',
+    sess: options.confirmSess ?? 'dedup-confirm',
+  }, {
+    ...options,
+    lockName: 'dedup-confirm',
+    beforeAppend(state) {
+      if (!state?.byId?.[id]) {
+        throw new MemoryError('E_REF_NOT_FOUND', `去重候选已不存在：${id}`);
+      }
+      // appendEventToRoot 在同一把根锁内完成校验、追加和派生，计数只从事件流计算。
+      count = (state.confirmCount[id] ?? 0) + 1;
+    },
+  });
   return count;
 }

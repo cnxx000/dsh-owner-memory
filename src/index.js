@@ -1,10 +1,12 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { readAblation } from './ablation.js';
 import { configForAgent, configForExec, resolveConfig } from './config.js';
 import { deriveState } from './derive.js';
 import { createTools } from './host.js';
-import { assemblyReferencesVariable, renderAssemblyText, renderPinned, verifyInjection } from './l0.js';
+import { renderPinned } from './l0.js';
 import { initRoot, persistPinnedHealth, readJson, updateHealth } from './storage/files.js';
 import { readArchiveEvents, readEvents } from './storage/event-log.js';
 
@@ -51,16 +53,162 @@ const VARIABLE_NAME_FALLBACK = 'owner_memory';
 const SECTION_NAME = 'owner-memory';
 /** 排在宿主的部署人设段之后（order 越大越靠后）；数值只影响顺序，不影响正确性。 */
 const SECTION_ORDER = 900;
+const PERSONA_SECTIONS = new Set([
+  'deployment:persona-prefix',
+  'deployment:persona-suffix',
+]);
+const INJECTION_TTL_MS = 30 * 60 * 1000;
+const INJECTION_MAX_ENTRIES = 32;
+
+function firstLine(value) {
+  return String(value ?? '').split(/\r?\n/u)[0]?.trim() ?? '';
+}
+
+function agentIdFor(agent) {
+  const value = agent?.id ?? agent?.session?.id ?? agent?.session?.header?.id;
+  return value == null || value === '' ? null : String(value);
+}
+
+function injectionKeyForAgent(agent) {
+  const agentId = agentIdFor(agent);
+  return agentId === null ? null : `${process.pid}:${agentId}`;
+}
+
+function personaSegments(assembly) {
+  if (!assembly || typeof assembly !== 'object') return [];
+  return [...(assembly.sections ?? []), ...(assembly.contexts ?? [])]
+    .filter((item) => PERSONA_SECTIONS.has(item?.name));
+}
+
+function referencesVariable(segment, variableName) {
+  return typeof segment?.text === 'string'
+    && segment.text.includes(`{{${variableName}}}`);
+}
+
+function personaHash(segments) {
+  const stable = segments.map((segment) => ({
+    name: segment.name,
+    text: String(segment.text ?? ''),
+    interpolate: segment.interpolate !== false,
+  }));
+  return crypto.createHash('sha256').update(JSON.stringify(stable)).digest('hex').slice(0, 16);
+}
 
 /**
- * 每个 agent 自己的注入状态。
- *
- * `health.json` 是按工作区存的，但「人设有没有引用记忆」是按 agent 的：创造模式的人设
- * 本来就没有 `{{owner_memory}}`，它不能拿这份共享 health 去评判鲸鱼娘的注入。这里按
- * agent 记两个布尔值：references（这条人设引用了变量吗）、missing（引用了但没进去吗）。
- * 没接线的 agent 既不写 health，也不在工具返回里挂假警告。
+ * 只根据 system-prompt/assemble 可见的确定证据判定。
+ * complete section 会在 waterfall 返回后恢复，因此段消失只能 deferred，不能判 missing。
  */
-const agentCheckState = new WeakMap();
+export function judgeInjection({
+  input,
+  output,
+  variableName = VARIABLE_NAME_FALLBACK,
+  observation,
+  pinnedHead = '',
+  stickyOk = new Set(),
+} = {}) {
+  const inputPersona = personaSegments(input);
+  const referenced = inputPersona.filter((segment) => referencesVariable(segment, variableName));
+  const hash = referenced.length > 0 ? personaHash(referenced) : null;
+  const base = { personaHash: hash, references: referenced.length > 0 };
+
+  if (referenced.length === 0) {
+    return { ...base, verdict: 'n/a', reason: 'no_reference', writable: false };
+  }
+  if (observation?.called && !observation.error && observation.empty) {
+    return { ...base, verdict: 'n/a', reason: 'provider_empty', writable: false };
+  }
+  if (!Object.hasOwn(input?.variables ?? {}, variableName)) {
+    return { ...base, verdict: 'missing', reason: 'not_registered', writable: true };
+  }
+  if (referenced.some((segment) => segment.interpolate === false)) {
+    return { ...base, verdict: 'missing', reason: 'interpolate_off', writable: true };
+  }
+  if (observation?.error) {
+    return { ...base, verdict: 'missing', reason: 'provider_error', writable: true };
+  }
+
+  const outputPersona = personaSegments(output);
+  const head = observation?.head || pinnedHead;
+  const outputHasHead = head.length > 0
+    && outputPersona.some((segment) => String(segment.text ?? '').includes(head));
+  const referencedNames = new Set(referenced.map((segment) => segment.name));
+  const outputNames = new Set(outputPersona.map((segment) => segment.name));
+  const referencedStillPresent = [...referencedNames].every((name) => outputNames.has(name));
+
+  if (
+    observation?.called
+    && !observation.error
+    && !observation.empty
+    && head.length > 0
+    && String(observation.value ?? '').includes(head)
+    && referencedStillPresent
+  ) {
+    return { ...base, verdict: 'ok', reason: 'provider_observed', writable: true };
+  }
+  if (hash && stickyOk.has(hash)) {
+    return { ...base, verdict: 'ok', reason: 'cached', writable: true };
+  }
+  if (outputHasHead) {
+    return { ...base, verdict: 'ok', reason: 'output_contains_head', writable: true };
+  }
+
+  const disappeared = referenced.some((segment) => !outputNames.has(segment.name));
+  return {
+    ...base,
+    verdict: 'deferred',
+    reason: disappeared ? 'persona_disappeared' : 'no_positive_evidence',
+    writable: false,
+  };
+}
+
+function processIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // Windows 上 EPERM 表示进程存在但当前用户无权发信号；只有 ESRCH 才能证明不存在。
+    return error?.code !== 'ESRCH';
+  }
+}
+
+function persistInjectionVerdict(root, key, result) {
+  const now = Date.now();
+  const ts = new Date(now).toISOString();
+  return updateHealth(root, (health) => {
+    const source = health.injection && typeof health.injection === 'object'
+      ? health.injection
+      : {};
+    const deadPids = new Set();
+    for (const entry of Object.values(source)) {
+      if (!processIsAlive(entry?.pid)) deadPids.add(entry?.pid);
+    }
+    const entries = Object.fromEntries(Object.entries(source).filter(([, entry]) => (
+      entry
+      && !deadPids.has(entry.pid)
+      && Number.isFinite(Date.parse(entry.ts))
+      && now - Date.parse(entry.ts) <= INJECTION_TTL_MS
+    )));
+    entries[key] = {
+      personaHash: result.personaHash,
+      verdict: result.verdict,
+      reason: result.reason,
+      ts,
+      pid: process.pid,
+    };
+    const ordered = Object.entries(entries)
+      .sort(([, left], [, right]) => Date.parse(right.ts) - Date.parse(left.ts))
+      .slice(0, INJECTION_MAX_ENTRIES);
+    const injection = Object.fromEntries(ordered);
+    const missingCount = ordered.filter(([, entry]) => entry.verdict === 'missing').length;
+    return {
+      ...health,
+      injection,
+      injection_missing: missingCount > 0,
+      injection_missing_count: missingCount,
+    };
+  });
+}
 
 /**
  * 安全地取一个宿主的服务。
@@ -91,17 +239,10 @@ function loadState(config) {
 
 function addPendingWarning(config, result, agent) {
   if (!result || typeof result !== 'object') return result;
-  const state = agent ? agentCheckState.get(agent) : undefined;
-  if (state) {
-    // 这条人设没引用变量（或引用了且确实进去了）→ 不警告，也不动共享 health。
-    if (!state.references || !state.missing) return result;
-    state.missing = false;
-  } else {
-    // 认不出 agent（程序化调用/夹具）：退回旧的共享 health 判断。
-    const health = readJson(path.join(config.localRoot, 'health.json'), {});
-    if (!health.injection_missing) return result;
-  }
-  updateHealth(config.localRoot, (current) => ({ ...current, injection_missing: false }));
+  const key = injectionKeyForAgent(agent);
+  if (key === null) return result;
+  const health = readJson(path.join(config.localRoot, 'health.json'), {});
+  if (health.injection?.[key]?.verdict !== 'missing') return result;
   return {
     ...result,
     warnings: [
@@ -116,14 +257,16 @@ function makeProvider(config) {
   return () => {
     const memoryPath = path.join(config.localRoot, 'events.jsonl');
     const health = {};
-    const rendered = renderPinned(loadState(config), { health });
+    const ablation = readAblation(config.localRoot);
+    const rendered = renderPinned(loadState(config), { health, ablation });
     // 配额指标必须落盘，否则 audit 永远读到默认值（见 files.js persistPinnedHealth）。
     try {
       persistPinnedHealth(config.localRoot, health);
     } catch {
       // health 写不进去不影响这一轮的注入
     }
-    return `【主人记忆 · ${memoryPath}】\n${rendered}`;
+    if (ablation === 'off') return '';
+    return `【长期记忆 · ${memoryPath}】\n${rendered}`;
   };
 }
 
@@ -182,10 +325,44 @@ function attachToAgent(agent, config, variableName, warn) {
   // 注入和自检都按这条会话自己的工作区算，不能再用 apply 时的 profile 目录。
   const bound = configForAgent(config, agent);
   const provider = makeProvider(bound);
-  let lastPinned = '';
-  const read = () => {
-    lastPinned = provider();
-    return lastPinned;
+  const providerObservations = new WeakMap();
+  const agentId = agentIdFor(agent) ?? 'unknown';
+  const healthKey = injectionKeyForAgent(agent) ?? `${process.pid}:unknown`;
+  const checkState = {
+    references: false,
+    missing: false,
+    head: '',
+    okPersonaHashes: new Set(),
+  };
+  let suffixHinted = false;
+
+  const read = (context) => {
+    const observation = {
+      called: true,
+      error: null,
+      value: undefined,
+      head: '',
+      empty: false,
+      pending: null,
+    };
+    try {
+      const value = provider();
+      observation.value = value;
+      observation.head = firstLine(value);
+      observation.empty = value == null || String(value).trim() === '';
+      checkState.head = observation.head;
+      return value;
+    } catch (error) {
+      observation.error = error;
+      // provider 先于 assemble；先挂起，等同一 context 的输入 assembly 给出引用证据。
+      observation.pending = { verdict: 'deferred', reason: 'provider_error_unconfirmed' };
+      // 保留 undefined，让宿主最终插值继续 fail-loud，同时允许中间件完成判定。
+      return undefined;
+    } finally {
+      if ((typeof context === 'object' && context !== null) || typeof context === 'function') {
+        providerObservations.set(context, observation);
+      }
+    }
   };
 
   try {
@@ -204,68 +381,59 @@ function attachToAgent(agent, config, variableName, warn) {
     return;
   }
 
-  const preset = String(agent?.session?.header?.agentPreset ?? '');
-  const expectWired = preset !== '' && bound.wiredPresets.includes(preset);
-  const checkState = { preset, expectWired, references: false, missing: false };
-  agentCheckState.set(agent, checkState);
-
-  const check = (finalPromptText) => {
-    const pinned = lastPinned || read();
-    const result = verifyInjection(finalPromptText, pinned);
-    checkState.references = true;
-    checkState.missing = result.missing;
+  const commit = (result) => {
+    checkState.references = result.references;
+    checkState.missing = result.verdict === 'missing';
+    if (result.verdict === 'ok' && result.personaHash) {
+      checkState.okPersonaHashes.add(result.personaHash);
+    }
+    if (!result.writable) return result;
     try {
-      updateHealth(bound.localRoot, (health) => ({ ...health, injection_missing: result.missing }));
+      persistInjectionVerdict(bound.localRoot, healthKey, result);
+      probe(
+        'inject-verdict',
+        `agent=${agentId} verdict=${result.verdict} reason=${result.reason}`,
+      );
     } catch {
       // health 写不进去不影响这一轮
     }
     return result;
   };
 
-  /**
-   * 结构化 assembly 的自检入口。
-   *
-   * 2026-11-03 第二个坑：health 是按工作区存的，而「人设有没有引用记忆」是按 agent 的。
-   * 创造模式的人设没有 `{{owner_memory}}`，它每轮如实报缺失，会把鲸鱼娘写好的 false
-   * 盖回 true。所以先判断这条 assembly 到底有没有引用变量：
-   *   - preset 在 `wiredPresets` 里却没引用 → 说明人设被改坏了（A18），按缺失报；
-   *   - preset 不在名单里（创造模式/标准模式）→ 不评判、不写 health。
-   */
-  const checkAssembly = (assembly) => {
-    if (typeof assembly === 'string' || typeof assembly?.text === 'string') {
-      return check(String(assembly?.text ?? assembly));
-    }
-    const references = assemblyReferencesVariable(assembly, variableName);
-    checkState.references = references;
-    if (!references) {
-      if (!checkState.expectWired) {
-        checkState.missing = false;
-        return undefined;
-      }
-      // 应该在名单里接线却没接线：按「记忆没进去」处理，warning 会照常挂到下一次 mem_* 返回里。
-      return check('');
-    }
-    return check(renderAssemblyText(assembly));
-  };
-
-  // 注入自检：宿主组装完之后回头看最终文本里有没有 L0 的首行特征串。
   const install = () => {
     try {
-      // 有的宿主版本给的是「已经渲染好的最终文本」。
-      if (typeof sp.afterRender === 'function') {
-        sp.afterRender((finalPromptText) => check(String(finalPromptText ?? '')));
-        return true;
-      }
       if (typeof agent.ctx.on === 'function') {
-        agent.ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
-          const assembled = await next();
+        agent.ctx.on('system-prompt/assemble', async (input, context, next) => {
+          const output = await next();
           try {
-            // 真宿主给的是结构化 assembly，不是文本；按宿主的插值规则渲染一遍再判。
-            checkAssembly(assembled);
+            const inputPersona = personaSegments(input);
+            const suffixReferenced = inputPersona.some((segment) => (
+              segment.name === 'deployment:persona-suffix'
+              && referencesVariable(segment, variableName)
+            ));
+            if (suffixReferenced && !suffixHinted) {
+              suffixHinted = true;
+              probe(
+                'inject-suffix',
+                `agent=${agentId} 建议把 {{${variableName}}} 移到 deployment:persona-prefix`,
+              );
+            }
+            const canKeyContext = (
+              (typeof context === 'object' && context !== null)
+              || typeof context === 'function'
+            );
+            commit(judgeInjection({
+              input,
+              output,
+              variableName,
+              observation: canKeyContext ? providerObservations.get(context) : undefined,
+              pinnedHead: checkState.head,
+              stickyOk: checkState.okPersonaHashes,
+            }));
           } catch {
             // 自检失败不许影响组装
           }
-          return assembled;
+          return output;
         });
         return true;
       }
@@ -286,7 +454,7 @@ export function apply(ctx, options = {}) {
   probe('apply-enter', `hasTools=${typeof toolsService?.register === 'function'} hasOn=${typeof on === 'function'}`);
   let config;
   try {
-    config = resolveConfig(options);
+    config = resolveConfig({ ...options, probe });
   } catch (error) {
     probe('apply-throw', `stage=resolveConfig err=${error?.message ?? error}`);
     throw error;
@@ -300,7 +468,13 @@ export function apply(ctx, options = {}) {
     const fallback = path.join(os.homedir(), '.dsh', 'owner-memory-local');
     console.warn(`[dsh-owner-memory] localRoot 落在程序安装目录（${config.localRoot}），改用 ${fallback}`);
     // 这是固定的兜底位置，不能再被「按会话工作区重算」拉回安装目录。
-    config = { ...config, localRoot: fallback, localRootRelative: false, localRelative: fallback };
+    config = {
+      ...config,
+      localRoot: fallback,
+      localRootRelative: false,
+      localRelative: fallback,
+      ...(!config.aliasesPathExplicit ? { aliasesPath: path.join(fallback, 'aliases.json') } : {}),
+    };
   }
   const variableName = options.variableName ?? config.variableName ?? VARIABLE_NAME_FALLBACK;
   // 一次性路径播报：装错地方时靠这行日志能看出来。

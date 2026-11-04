@@ -5,6 +5,7 @@ function lexical(left, right) {
 }
 
 export function eventSearchText(event) {
+  if (['confirm', 'symptom'].includes(event?.kind)) return '';
   return [
     event.text ?? '',
     event.key ?? '',
@@ -12,17 +13,24 @@ export function eventSearchText(event) {
   ].join(' ');
 }
 
-export function buildIndex(state) {
+export function recallSearchText(state, event, opts = {}) {
+  const original = eventSearchText(event);
+  if (opts.symptomsInRecall !== true || !original) return original;
+  return [
+    original,
+    ...(state.symptoms?.[event.id] ?? []),
+    ...(state.asks?.[event.id] ?? []),
+  ].join(' ');
+}
+
+export function buildIndex(state, opts = {}) {
   const temporary = new Map();
   const ids = Object.keys(state.byId ?? {}).sort(lexical);
 
   for (const id of ids) {
     const event = state.byId[id];
-    const grams = [...new Set([
-      ...tokensOf(event.text ?? ''),
-      ...tokensOf(event.key ?? ''),
-      ...(event.tags ?? []).flatMap((tag) => tokensOf(tag)),
-    ])].sort(lexical);
+    if (['confirm', 'symptom'].includes(event.kind)) continue;
+    const grams = [...new Set(tokensOf(recallSearchText(state, event, opts)))].sort(lexical);
     for (const gram of grams) {
       if (!temporary.has(gram)) temporary.set(gram, []);
       temporary.get(gram).push(id);

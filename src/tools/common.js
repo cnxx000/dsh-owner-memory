@@ -1,4 +1,4 @@
-import { MemoryError, normalizeText } from '../schema.js';
+import { MemoryError, normalizeText, viewKind } from '../schema.js';
 import { DEFAULTS } from '../config.js';
 
 /**
@@ -29,7 +29,7 @@ export function commonInput(args, context) {
 
 export function assertGlobalAllowed(event) {
   if (event.scope !== 'global') return;
-  if (event.kind === 'rule') return;
-  if (event.kind === 'fact' && (event.weight ?? DEFAULTS.defaultWeight) >= 4) return;
+  if (viewKind(event) === 'rule') return;
+  if (viewKind(event) === 'fact' && (event.weight ?? DEFAULTS.defaultWeight) >= 4) return;
   throw new MemoryError('E_GLOBAL_KIND', 'global 只接受 rule 或 weight>=4 的 fact');
 }

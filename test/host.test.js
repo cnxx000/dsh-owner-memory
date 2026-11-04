@@ -46,7 +46,7 @@ test('插件入口注册六工具并通过变量通道实时提供 pinned', (t) 
   const provided = host.variables.get('owner_memory')();
   const pinnedFirstLine = renderPinned({ byId: {}, byKey: {}, status: {} }).split('\n')[0];
   assert.notEqual(provided, '');
-  assert.ok(provided.startsWith('【主人记忆 · '));
+  assert.ok(provided.startsWith('【长期记忆 · '));
   assert.ok(provided.includes(path.resolve(root, '.dsh-mem', 'events.jsonl')));
   assert.ok(provided.includes(pinnedFirstLine));
 });
@@ -69,7 +69,6 @@ test('缺 systemPrompt 服务只 warn，写工具仍注册', (t) => {
 
 test('运行时注入自检写 health，并在下一次 mem 调用返回 warning', async (t) => {
   const root = workspace(t);
-  // 真契约：自检挂在 agent 的 system-prompt/assemble 中间件上，不是插件作用域的 afterRender。
   const handlers = new Map();
   const host = Object.assign(createFakeHost(), {
     on(event, handler) { handlers.set(event, handler); return () => {}; },
@@ -77,30 +76,41 @@ test('运行时注入自检写 health，并在下一次 mem 调用返回 warning
   apply(host, options(root));
 
   const agentHandlers = new Map();
+  const agentTools = [];
   const agent = {
+    id: 'session-inject-selfcheck',
+    session: { header: { id: 'session-inject-selfcheck', agentPreset: 'whalechan' } },
     ctx: {
-      tools: { register() { return () => {}; } },
+      tools: { register(item) { agentTools.push(item); return () => {}; } },
       systemPrompt: { variable(_name, provider) { agent.provider = provider; return () => {}; } },
       on(event, handler) { agentHandlers.set(event, handler); return () => {}; },
     },
   };
   handlers.get('agent/created')({ agent, source: 'startup' });
 
-  const provided = agent.provider();
   const assemble = agentHandlers.get('system-prompt/assemble');
   assert.equal(typeof assemble, 'function');
+  const persona = { name: 'deployment:persona-prefix', text: '{{owner_memory}}' };
 
-  await assemble({}, {}, async () => ({ text: `persona\n${provided}` }));
+  const context = {};
+  const provided = agent.provider(context);
+  const healthy = {
+    sections: [persona], contexts: [], tools: [], variables: { owner_memory: provided },
+  };
+  await assemble(healthy, context, async () => healthy);
   let health = readJson(path.join(root, '.dsh-mem', 'health.json'));
   assert.equal(health.injection_missing, false);
 
-  await assemble({}, {}, async () => ({ text: 'persona 里没有 owner_memory' }));
+  const broken = { sections: [persona], contexts: [], tools: [], variables: {} };
+  await assemble(broken, {}, async () => broken);
   health = readJson(path.join(root, '.dsh-mem', 'health.json'));
   assert.equal(health.injection_missing, true);
+  assert.equal(health.injection[`${process.pid}:${agent.id}`].reason, 'not_registered');
 
-  const result = await tool(host, 'mem_audit').execute({ what: 'status' });
+  const result = await agentTools.find((item) => item.name === 'mem_audit')
+    .execute({ what: 'status' }, { agent });
   assert.ok(result.warnings.some((warning) => warning.includes('{{owner_memory}}')));
-  assert.equal(readJson(path.join(root, '.dsh-mem', 'health.json')).injection_missing, false);
+  assert.equal(readJson(path.join(root, '.dsh-mem', 'health.json')).injection_missing, true);
 });
 
 test('A19：mem_note 绕开会抛错的 agent fs seam，并落到工作区内', async (t) => {
@@ -180,6 +190,7 @@ test('包元数据与 cordis patch 可发布且保持零依赖', () => {
     'injectMaxChars: 1200',
     'recallLimit: 4',
     'recallMaxChars: 800',
+    'symptomsInRecall: true',
     'foldAtLines: 20000',
   ]) {
     assert.ok(patch.includes(field));

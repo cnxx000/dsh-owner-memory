@@ -14,4 +14,10 @@
         injectMaxChars: 1200
         recallLimit: 4
         recallMaxChars: 800
+        symptomsInRecall: true
+        vector:
+          enabled: true
+          floor: null
+          beta: 0.5
+          modelDir: '~/.dsh/owner-memory/models/bge-small-zh-v1.5@75c43b0'
         foldAtLines: 20000

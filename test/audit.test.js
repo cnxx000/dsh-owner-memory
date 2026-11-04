@@ -137,6 +137,22 @@ test('§9.1 原因码逐条可产生', async (t) => {
     log: config.localRoot,
   });
 
+  const vectorFixture = prepared([
+    event('m_v1', 'note', '无关向量记录一'),
+    event('m_v2', 'note', '无关向量记录二'),
+    event('m_v3', 'note', '无关向量记录三'),
+  ]);
+  recall(vectorFixture.state, vectorFixture.index, '银河检索词', {
+    limit: 4,
+    now: NOW,
+    log: config.localRoot,
+    vec: {
+      cosById: { m_v1: 0.99, m_v2: 0.98, m_v3: 0.97 },
+      floor: 0.5,
+      beta: 0.5,
+    },
+  });
+
   const reasons = new Set(readReceipts(config.localRoot)
     .flatMap((receipt) => receipt.candidates)
     .map((candidate) => candidate.why)
@@ -189,6 +205,20 @@ test('health 返回六张清单并复用 suspectedShouldBeFact', async (t) => {
   state.status[first.id] = { status: 'active' };
   fs.writeFileSync(stateFile, `${JSON.stringify(state, null, 2)}\n`);
   const eventsBefore = fs.readFileSync(path.join(config.localRoot, 'events.jsonl'), 'utf8');
+  const healthFile = path.join(config.localRoot, 'health.json');
+  const storedHealth = readJson(healthFile);
+  storedHealth.injection_missing = true;
+  storedHealth.injection = Object.fromEntries(Array.from({ length: 6 }, (_, index) => [
+    `${process.pid}:agent-${index}`,
+    {
+      personaHash: `hash-${index}`,
+      verdict: index === 1 ? 'missing' : 'ok',
+      reason: index === 1 ? 'not_registered' : 'cached',
+      ts: new Date(NOW + index).toISOString(),
+      pid: process.pid,
+    },
+  ]));
+  fs.writeFileSync(healthFile, `${JSON.stringify(storedHealth, null, 2)}\n`);
   const health = await memAudit(config, { what: 'health', now: NOW });
 
   assert.deepEqual(Object.keys(health), [
@@ -197,12 +227,17 @@ test('health 返回六张清单并复用 suspectedShouldBeFact', async (t) => {
     'almost_solid',
     'superseded',
     'suspected_should_be_fact',
+    'injection',
     'metrics',
   ]);
   assert.equal(health.contradictions.length, 1);
   assert.ok(health.suspected_should_be_fact.includes(suspect.id));
   assert.equal(typeof health.metrics.rules_overflow, 'boolean');
   assert.equal(typeof health.metrics.injection_missing, 'boolean');
+  assert.equal(health.injection.length, 5);
+  assert.equal(health.injection[0].verdict, 'missing');
+  assert.equal(health.injection[0].reason, 'not_registered');
+  assert.equal(health.injection[0].ts, new Date(NOW + 1).toISOString());
   assert.equal(fs.readFileSync(path.join(config.localRoot, 'events.jsonl'), 'utf8'), eventsBefore);
 
   const key = await memAudit(config, { what: 'key', key: '主人.编辑器偏好' });
@@ -211,4 +246,34 @@ test('health 返回六张清单并复用 suspectedShouldBeFact', async (t) => {
   assert.equal(key.items.length, 2);
   assert.equal(id.items[0].id, first.id);
   assert.equal(status.enabled, true);
+
+  // 旧 health.json 没有 injection 对象时仍返回空明细。
+  const legacy = readJson(healthFile);
+  delete legacy.injection;
+  fs.writeFileSync(healthFile, `${JSON.stringify(legacy, null, 2)}\n`);
+  assert.deepEqual((await memAudit(config, { what: 'health', now: NOW })).injection, []);
+});
+
+test('H1：health 统计 active 条目的 src=user 占比', async (t) => {
+  const config = workspace(t);
+  await memNote(config, {
+    kind: 'note',
+    text: '这是一条由 agent 写入的观察记录。',
+  }, { sessionId: 'audit-src-agent' });
+
+  const before = await memAudit(config, { what: 'health', now: NOW });
+  assert.equal(before.metrics.src_user_ratio, 0);
+  assert.equal(before.metrics.src_user_count, 0);
+  assert.equal(before.metrics.src_total_count, 1);
+
+  await memNote(config, {
+    kind: 'note',
+    text: '这是一条由用户明确提供的观察记录。',
+    src: 'user',
+  }, { sessionId: 'audit-src-user' });
+
+  const after = await memAudit(config, { what: 'health', now: NOW });
+  assert.equal(after.metrics.src_user_ratio, 0.5);
+  assert.equal(after.metrics.src_user_count, 1);
+  assert.equal(after.metrics.src_total_count, 2);
 });

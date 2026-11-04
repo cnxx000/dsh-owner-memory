@@ -1,4 +1,5 @@
-import { eventSearchText } from './indexer.js';
+import { recallSearchText } from './indexer.js';
+import { viewKind } from './schema.js';
 import { normalizeForSearch, tokensOf } from './tokenize.js';
 
 const DAY_MS = 86_400_000;
@@ -50,16 +51,29 @@ function longestCommonRun(left, right) {
 function positiveReferenceCount(state, targetId) {
   let count = 0;
   for (const event of Object.values(state.byId ?? {})) {
-    if (!['decision', 'note'].includes(event.kind)) continue;
+    if (!['decision', 'note'].includes(viewKind(event))) continue;
     if (state.status?.[event.id]?.status !== 'active') continue;
     if (event.refs?.includes(targetId)) count += 1;
   }
   return count;
 }
 
-export function baseScore(event, query, index) {
+function aliasBonusFor(state, event, query) {
+  const value = String(query ?? '');
+  let longest = 0;
+  for (const alias of state?.aliases?.[event.id]?.aliases ?? []) {
+    if (value.includes(alias)) longest = Math.max(longest, [...alias].length);
+  }
+  return {
+    aliasBonus: Math.min(8, 2 * longest),
+    aliasHit: longest > 0,
+  };
+}
+
+export function baseScore(event, query, index, state, opts = {}) {
   const queryTokens = [...new Set(tokensOf(query))];
-  const eventTokens = new Set(tokensOf(eventSearchText(event)));
+  const searchText = recallSearchText(state, event, opts);
+  const eventTokens = new Set(tokensOf(searchText));
   const hits = queryTokens.filter((gram) => eventTokens.has(gram));
   let tokenScore = 0;
   for (const gram of hits) {
@@ -68,7 +82,7 @@ export function baseScore(event, query, index) {
   }
 
   const normalizedQuery = normalizeForSearch(query).replace(/\s+/gu, '');
-  const normalizedEvent = normalizeForSearch(eventSearchText(event)).replace(/\s+/gu, '');
+  const normalizedEvent = normalizeForSearch(searchText).replace(/\s+/gu, '');
   const rawRun = longestCommonRun(normalizedQuery, normalizedEvent);
   const singleHanQuery = /^\p{Script=Han}$/u.test(normalizedQuery);
   const maxRunLen = rawRun >= 2 || singleHanQuery ? rawRun : 0;
@@ -76,16 +90,19 @@ export function baseScore(event, query, index) {
     ? event.key.split('.').some((part) => normalizeForSearch(part) === normalizeForSearch(query))
     : false;
   const tagHit = (event.tags ?? []).some((tag) => normalizedQuery.includes(normalizeForSearch(tag)));
-  const base = tokenScore + 2 * maxRunLen + (keyHit ? 3 : 0) + (tagHit ? 1.5 : 0);
-  return { base, hits, maxRunLen, keyHit, tagHit };
+  const { aliasBonus, aliasHit } = aliasBonusFor(state, event, query);
+  const base = tokenScore + 2 * maxRunLen + (keyHit ? 3 : 0) + (tagHit ? 1.5 : 0)
+    + aliasBonus;
+  return { base, hits, maxRunLen, keyHit, tagHit, aliasBonus, aliasHit };
 }
 
 export function scoreEvent(state, index, event, query, opts = {}) {
-  const baseParts = baseScore(event, query, index);
-  const kind = KIND_WEIGHT[event.kind] ?? 0;
+  const baseParts = baseScore(event, query, index, state, opts);
+  const effectiveKind = viewKind(event);
+  const kind = KIND_WEIGHT[effectiveKind] ?? 0;
   const imp = 0.8 + 0.2 * (event.weight ?? 2);
   const ageDays = Math.max(0, ((opts.now ?? Date.now()) - Date.parse(event.ts)) / DAY_MS);
-  let halfLife = HALF_LIFE[event.kind] ?? 90;
+  let halfLife = HALF_LIFE[effectiveKind] ?? 90;
   if (event.solid === true || state.solid?.[event.id] === true) halfLife *= 3;
   const decay = halfLife === Infinity ? 1 : Math.max(0.15, 0.5 ** (ageDays / halfLife));
   const statusName = state.status?.[event.id]?.status ?? 'active';
@@ -103,6 +120,8 @@ export function scoreEvent(state, index, event, query, opts = {}) {
     refs,
     hits: baseParts.hits,
     maxRunLen: baseParts.maxRunLen,
+    aliasBonus: baseParts.aliasBonus,
+    aliasHit: baseParts.aliasHit,
   };
 }
 

@@ -21,6 +21,7 @@ test('相对 root：按 agent 工作区重算 localRoot，globalRoot 不变', ()
   const base = resolveConfig({ workspace: A, root: '.dsh-mem', globalRoot: path.join(A, 'global') });
   const bound = configForAgent(base, { session: { header: { cwd: B } } });
   assert.equal(bound.localRoot, path.join(B, '.dsh-mem'));
+  assert.equal(bound.aliasesPath, path.join(B, '.dsh-mem', 'aliases.json'));
   assert.equal(bound.workspace, B);
   assert.equal(bound.globalRoot, base.globalRoot);
 });
@@ -37,6 +38,7 @@ test('拿不到工作区时原样退回，不猜', () => {
   assert.equal(configForAgent(base, {}).localRoot, base.localRoot);
   assert.equal(configForAgent(base, undefined), base);
   assert.equal(configForExec(base, undefined), base);
+  assert.equal(base.symptomsInRecall, true);
 });
 
 test('exec.agent 缺 session.header.cwd 时按 header.cwd 兜底', () => {
@@ -57,4 +59,19 @@ test('wiredPresets：默认空名单，配置后保留独立拷贝', () => {
   list.push('cordis');
   assert.deepEqual(config.wiredPresets, ['whalechan'], '不许被外部数组后来改动影响');
   assert.deepEqual(configForAgent(config, { session: { header: { cwd: B } } }).wiredPresets, ['whalechan']);
+});
+
+test('vector：深合并默认值并展开 modelDir', () => {
+  const config = resolveConfig({
+    workspace: A,
+    home: B,
+    vector: { beta: 0.25, enabled: false },
+  });
+  assert.equal(config.vector.enabled, false);
+  assert.equal(config.vector.beta, 0.25);
+  assert.equal(config.vector.floor, null);
+  assert.equal(
+    config.vector.modelDir,
+    path.join(B, '.dsh', 'owner-memory', 'models', 'bge-small-zh-v1.5@75c43b0'),
+  );
 });

@@ -164,7 +164,11 @@ test('宿主契约：execute 的返回值满足各自的 output.schema（写入/
     const audited = await tools.mem_audit.execute({ what: 'health' }, context);
     assert.deepEqual(violationsOf(tools.mem_audit.output.schema, audited), []);
 
-    const fixed = await tools.mem_fix.execute({ op: 'retract', refs: [written.id] }, context);
+    const fixed = await tools.mem_fix.execute({
+      op: 'retract',
+      refs: [written.id],
+      clearKey: ['probe.contract'],
+    }, context);
     assert.deepEqual(violationsOf(tools.mem_fix.output.schema, fixed), []);
     assert.deepEqual(fixed.affected, [written.id]);
   } finally {

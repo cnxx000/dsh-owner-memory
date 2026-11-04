@@ -43,7 +43,7 @@ function statusEntry(state, event) {
 function contradictions(state) {
   const grouped = new Map();
   for (const event of Object.values(state.byId ?? {})) {
-    if (event.kind !== 'fact' || state.status?.[event.id]?.status !== 'active') continue;
+    if (event.key === undefined || state.status?.[event.id]?.status !== 'active') continue;
     const values = grouped.get(event.key) ?? [];
     values.push(event.id);
     grouped.set(event.key, values);
@@ -69,7 +69,10 @@ function fadingEntries(state, receipts, now) {
   const index = buildIndex(state);
   const picked = lastPickedById(receipts);
   return Object.values(state.byId ?? {})
-    .filter((event) => state.status?.[event.id]?.status === 'active')
+    .filter((event) => (
+      event.kind !== 'symptom'
+      && state.status?.[event.id]?.status === 'active'
+    ))
     .map((event) => ({
       id: event.id,
       decay: scoreEvent(state, index, event, '', { now }).decay,
@@ -104,16 +107,45 @@ function replacedRecently(state, now) {
     .sort((left, right) => left.id.localeCompare(right.id));
 }
 
+function injectionDetails(health) {
+  if (!health.injection || typeof health.injection !== 'object') return [];
+  return Object.entries(health.injection)
+    .flatMap(([key, entry]) => (
+      entry && typeof entry === 'object'
+        ? [{
+            key,
+            personaHash: entry.personaHash ?? null,
+            verdict: entry.verdict ?? null,
+            reason: entry.reason ?? null,
+            ts: entry.ts ?? null,
+            pid: entry.pid ?? null,
+          }]
+        : []
+    ))
+    .sort((left, right) => (
+      Number(right.verdict === 'missing') - Number(left.verdict === 'missing')
+      || Date.parse(right.ts ?? 0) - Date.parse(left.ts ?? 0)
+      || left.key.localeCompare(right.key)
+    ))
+    .slice(0, 5);
+}
+
 function healthAudit(root, state, now) {
   const actual = actualSourceHash(root);
   const health = readJson(path.join(root, 'health.json'), {});
   const receipts = readReceipts(root, { limit: 200 });
+  const active = Object.values(state.byId ?? {}).filter(
+    (event) => event.kind !== 'symptom' && state.status?.[event.id]?.status === 'active',
+  );
+  const srcUserCount = active.filter((event) => event.src === 'user').length;
+  const srcTotalCount = active.length;
   return {
     contradictions: contradictions(state),
     fading: fadingEntries(state, receipts, now),
     almost_solid: almostSolid(state),
     superseded: replacedRecently(state, now),
     suspected_should_be_fact: suspectedShouldBeFact(state),
+    injection: injectionDetails(health),
     metrics: {
       corruptLines: health.corruptLines ?? 0,
       lock_stolen: health.lock_stolen ?? 0,
@@ -123,16 +155,30 @@ function healthAudit(root, state, now) {
       eventBytes: actual.bytes,
       linesUntilFold: Math.max(0, DEFAULTS.foldAtLines - actual.lines),
       bytesUntilFold: Math.max(0, DEFAULTS.foldAtBytes - actual.bytes),
+      src_user_ratio: srcTotalCount === 0
+        ? 0
+        : Number((srcUserCount / srcTotalCount).toFixed(2)),
+      src_user_count: srcUserCount,
+      src_total_count: srcTotalCount,
       rules_overflow: Boolean(health.rules_overflow),
       rules_truncated_hard: Boolean(health.rules_truncated_hard),
+      pit_overflow: Array.isArray(health.pit_overflow) ? health.pit_overflow : [],
+      pit_symptom_missing: Array.isArray(health.pit_symptom_missing)
+        ? health.pit_symptom_missing
+        : [],
+      ablation: ['none', 'no-pit', 'off'].includes(health.ablation)
+        ? health.ablation
+        : 'none',
       injection_missing: Boolean(health.injection_missing),
+      vec_index_stale: Boolean(health.vec_index_stale),
+      vector_disabled: health.vector_disabled ?? null,
     },
   };
 }
 
 function keyAudit(state, key) {
   const ids = new Set(Object.values(state.byId ?? {})
-    .filter((event) => event.kind === 'fact' && event.key === key)
+    .filter((event) => event.key !== undefined && event.key === key)
     .map((event) => event.id));
   const items = Object.values(state.byId ?? {})
     .filter((event) => ids.has(event.id) || event.refs?.some((id) => ids.has(id)))

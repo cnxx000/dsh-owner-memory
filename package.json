@@ -1,6 +1,6 @@
 {
   "name": "dsh-owner-memory",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "DSH 用的本地长期记忆插件：五工具 + 1200 字符 L0 每轮注入 + 可体检；记忆只落工作区，无网络请求。",
   "keywords": [
@@ -21,6 +21,8 @@
   },
   "files": [
     "src",
+    "scripts",
+    "vendor",
     "cordis.patch.yml"
   ],
   "dsh": {

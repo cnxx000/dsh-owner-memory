@@ -144,11 +144,6 @@ export async function rebuildState(root, options = {}) {
         Date.parse(left.ts) - Date.parse(right.ts) || left.id.localeCompare(right.id)
       ));
       const candidate = deriveState(complete, { sourceHash });
-      const previous = readJson(path.join(root, 'state.json'), null);
-      for (const field of ['confirmCount', 'lastSeenAt', 'carriedSessions']) {
-        // 这些字段按设计不进事件流；正常追加重算时要继承，只有删除派生品全量重建才归零。
-        if (previous?.[field] !== undefined) candidate[field] = structuredClone(previous[field]);
-      }
       const after = fs.readFileSync(path.join(root, 'events.jsonl'));
       const afterLines = calculateMetaFromBytes(after).lines;
       if (afterLines !== sourceHash.lines) {
@@ -191,37 +186,74 @@ function verifyTail(root) {
   }
 }
 
-export async function appendEvent(config, input) {
+function eventFromInput(input) {
   const normalized = normalizeEventInput(input);
-  const root = rootForScope(config, normalized.scope);
+  const ts = input.ts ?? localIso();
+  const event = {
+    id: input.id ?? generateId(),
+    ts,
+    kind: normalized.kind,
+    text: normalized.text,
+    ...(normalized.key !== undefined ? { key: normalized.key } : {}),
+    ...(normalized.headline !== undefined ? { headline: normalized.headline } : {}),
+    ...(normalized.kind === 'fact' ? { verifiedAt: normalized.verifiedAt ?? ts } : {}),
+    ...(normalized.tags !== undefined ? { tags: normalized.tags } : {}),
+    weight: normalized.weight,
+    ...(normalized.refs !== undefined ? { refs: normalized.refs } : {}),
+    ...(normalized.replaces !== undefined ? { replaces: normalized.replaces } : {}),
+    ...(normalized.clearKey !== undefined ? { clearKey: normalized.clearKey } : {}),
+    ...(normalized.aliases !== undefined ? { aliases: normalized.aliases } : {}),
+    ...(normalized.symptoms !== undefined ? { symptoms: normalized.symptoms } : {}),
+    ...(normalized.asks !== undefined ? { asks: normalized.asks } : {}),
+    ...(normalized.quote !== undefined ? { quote: normalized.quote } : {}),
+    ...(normalized.proposal !== undefined ? { proposal: normalized.proposal } : {}),
+    scope: normalized.scope,
+    src: normalized.src,
+    ...(normalized.pin !== undefined ? { pin: normalized.pin } : {}),
+    ...(normalized.ownerQuote !== undefined ? { ownerQuote: normalized.ownerQuote } : {}),
+    sess: normalized.sess,
+  };
+  validateEvent(event);
+  return event;
+}
+
+export async function appendEventToRoot(root, input, options = {}) {
   initRoot(root);
   if (fs.existsSync(path.join(root, 'disabled'))) {
     throw new MemoryError('E_DISABLED', '本工作区记忆写入已关闭；删除 .dsh-mem/disabled 后可打开');
   }
+  const event = eventFromInput(input);
 
-  const event = {
-    id: input.id ?? generateId(),
-    ts: input.ts ?? localIso(),
-    kind: normalized.kind,
-    text: normalized.text,
-    ...(normalized.key !== undefined ? { key: normalized.key } : {}),
-    ...(normalized.tags !== undefined ? { tags: normalized.tags } : {}),
-    weight: normalized.weight,
-    ...(normalized.refs !== undefined ? { refs: normalized.refs } : {}),
-    scope: normalized.scope,
-    src: normalized.src,
-    ...(normalized.pin !== undefined ? { pin: normalized.pin } : {}),
-    sess: normalized.sess,
-  };
-  validateEvent(event);
+  await withLock(root, options.lockName ?? 'append-event', () => {
+    const before = fs.readFileSync(path.join(root, 'events.jsonl'));
+    const sourceBefore = calculateMetaFromBytes(before);
+    const live = parseEventContent(root, before.toString('utf8'), options).events;
+    const archived = readArchiveEvents(root, options).events;
+    const currentEvents = [...archived, ...live].sort((left, right) => (
+      Date.parse(left.ts) - Date.parse(right.ts) || left.id.localeCompare(right.id)
+    ));
+    const currentState = deriveState(currentEvents, { sourceHash: sourceBefore });
+    options.beforeAppend?.(currentState, event);
 
-  const line = JSON.stringify(event);
-  fs.appendFileSync(path.join(root, 'events.jsonl'), `${line}\n`, 'utf8');
-  verifyTail(root);
+    const complete = [...currentEvents, event].sort((left, right) => (
+      Date.parse(left.ts) - Date.parse(right.ts) || left.id.localeCompare(right.id)
+    ));
+    const line = JSON.stringify(event);
+    fs.appendFileSync(path.join(root, 'events.jsonl'), `${line}\n`, 'utf8');
+    verifyTail(root);
 
-  // state 与 meta 必须来自同一事件快照；一次持锁重建也避免跨进程路径重复争锁。
-  await rebuildState(root, { ...config, recordRebuild: false });
+    const sourceHash = calculateMeta(root);
+    const candidate = deriveState(complete, { sourceHash });
+    atomicWrite(path.join(root, 'state.json'), `${JSON.stringify(candidate, null, 2)}\n`);
+    atomicWrite(path.join(root, 'events.jsonl.meta'), `${JSON.stringify(sourceHash)}\n`);
+  }, options);
   return event;
+}
+
+export async function appendEvent(config, input) {
+  const normalized = normalizeEventInput(input);
+  const root = rootForScope(config, normalized.scope);
+  return appendEventToRoot(root, input, config);
 }
 
 export { appendEvent as append_event };
