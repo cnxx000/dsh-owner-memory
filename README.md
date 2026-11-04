@@ -181,6 +181,21 @@ test/             node:test 用例
 fixtures/         测试夹具（假宿主、子进程写入器）
 ```
 
+## 变更记录
+
+### 0.2.0（2026-11-04）
+
+- **L0 事实段支持 `headline`**：结论不再被 32 字盲切切掉；渲染成 `[主人|项目] <日期> <对象简称>.<方面段>：<headline>`，对象简称跨对象撞名时自动退完整对象段，跨年自动切 `YY-MM-DD`。
+- **静默丢条修复**：`fact_overflow` 现在同时记录「第 9 名之后」和「前 8 名里被字数/预算挤掉」的键；新增 `fact_headline_missing`、`fact_label_long`。
+- **坑类触发通道**：新增内部事件 `kind=symptom`，L0 增加一行不超过 50 字的「踩过 N 类坑（类别词…）→ 报错/没反应/不出现先 mem_recall」；类别词读 `.dsh-mem/pit-categories.txt`。`mem_note` 增加 `symptom` 参数。
+- **doc2query**：`symptom` 事件增加 `asks`，`mem_note` 增加 `ask`；`symptomsInRecall` 默认开启，把症状词与问法并入召回检索文本。冻结协议下留出 30 题 recall@5 从 10 提升到 27（b=18、c=1、p≈1.9e-5），回归与延迟无退化。
+- **消融开关**：`.dsh-mem/flags/ablation` 写 `no-pit` / `off` 可分别关掉门铃行或整块注入，档位记入 `health.ablation`（只用于评测，平时不该存在）。
+- **新增红线**：改前写死指标与门槛，只跑一次，不许调参重跑。
+
+### 0.1.0（2026-10-31）
+
+- 首个版本：五个工具（`mem_fact` / `mem_note` / `mem_fix` / `mem_recall` / `mem_audit`）、三层结构（L0 注入 / `events.jsonl` 真相源 / 按需召回）、A1 不变量（派生品全可重建）、注入自检与健康指标。
+
 ## 隐私
 
 - 记忆只写到 `<workspace>/.dsh-mem/`（以及启用 global scope 时的 `~/.dsh/owner-memory/`）；
