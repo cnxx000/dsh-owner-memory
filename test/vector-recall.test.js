@@ -76,14 +76,17 @@ test('字面候选至少两条时纯向量结果最多一条，回执记录 vec_
     event('m_vec3', '无关正文丙'),
   ];
   const { state, index } = prepared(events);
+  let receipt;
   const result = recall(state, index, '星河协议', {
     now: NOW,
     limit: 4,
     log: root,
+    onReceipt: (full) => { receipt = full; },
     vec: vec({ m_lex1: 0.7, m_lex2: 0.7, m_vec1: 0.99, m_vec2: 0.98, m_vec3: 0.97 }),
   });
   const similar = result.items.filter((item) => item.text.startsWith('[相近] '));
-  const receipt = readReceipts(root, { limit: 1 })[0];
+  // 向量分量只在内存回执里；落盘版只留前 5 名的 id/score/why/base。
+  assert.equal(readReceipts(root, { limit: 1 })[0].receipt_id, result.receipt_id);
   const quota = receipt.candidates.filter((candidate) => candidate.why === 'vec_quota');
 
   assert.equal(similar.length, 1);

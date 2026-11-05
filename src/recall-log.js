@@ -5,6 +5,35 @@ import { DEFAULTS } from './config.js';
 import { atomicWrite, initRoot, readJson, sleepSync } from './storage/files.js';
 
 const MAX_RECEIPTS = 200;
+// 每次追加都裁回 200 会让卡在上限的文件每记一条就整体重写；攒到 260 再裁，重写摊薄到 60 条一次。
+const TRIM_THRESHOLD = 260;
+const MAX_LOGGED_CANDIDATES = 5;
+
+function byScore(left, right) {
+  return (right.score ?? Number.NEGATIVE_INFINITY) - (left.score ?? Number.NEGATIVE_INFINITY)
+    || String(left.id).localeCompare(String(right.id));
+}
+
+/**
+ * 落盘的回执只留得分前 5 的候选（id / score / why，外加别名挖掘判 W/R 信号要用的 base），
+ * 完整候选数记在 candidateCount。入选与否看回执顶层的 picked。
+ */
+function compactReceipt(receipt) {
+  if (!Array.isArray(receipt?.candidates)) return receipt;
+  return {
+    ...receipt,
+    candidateCount: receipt.candidateCount ?? receipt.candidates.length,
+    candidates: [...receipt.candidates]
+      .sort(byScore)
+      .slice(0, MAX_LOGGED_CANDIDATES)
+      .map(({ id, score, why, base }) => ({
+        id,
+        score,
+        ...(why !== undefined ? { why } : {}),
+        ...(base !== undefined ? { base } : {}),
+      })),
+  };
+}
 
 function recentLines(file, limit) {
   if (!fs.existsSync(file) || limit <= 0) return [];
@@ -77,10 +106,10 @@ export function appendReceipt(root, receipt) {
   const lease = acquireLogLock(root);
   try {
     const file = path.join(root, 'recall-log.jsonl');
-    fs.appendFileSync(file, `${JSON.stringify(receipt)}\n`, 'utf8');
-    const lines = recentLines(file, MAX_RECEIPTS + 1);
-    if (lines.length > MAX_RECEIPTS) {
-      // 只从文件尾回读最多 201 条；即使旧文件异常膨胀，也不会整文件载入内存。
+    fs.appendFileSync(file, `${JSON.stringify(compactReceipt(receipt))}\n`, 'utf8');
+    const lines = recentLines(file, TRIM_THRESHOLD + 1);
+    if (lines.length >= TRIM_THRESHOLD) {
+      // 只从文件尾回读最多 261 条；即使旧文件异常膨胀，也不会整文件载入内存。
       atomicWrite(file, `${lines.slice(-MAX_RECEIPTS).join('\n')}\n`);
     }
   } finally {

@@ -8,6 +8,7 @@ import { memFact } from './tools/mem_fact.js';
 import { memFix } from './tools/mem_fix.js';
 import { memNote } from './tools/mem_note.js';
 import { readJson, updateHealth } from './storage/files.js';
+import { TOOL_SRCS } from './tools/common.js';
 import { vectorClientFor } from './vector/client.mjs';
 import {
   cosineById,
@@ -66,6 +67,12 @@ const commonProperties = {
   weight: { type: 'integer', minimum: 1, maximum: 5 },
   scope: { type: 'string', enum: ['local', 'global'] },
   pin: { type: 'boolean' },
+  src: {
+    type: 'string',
+    enum: [...TOOL_SRCS],
+    default: 'agent',
+    description: '内容来自主人原话时用 user；你自己推断/整理用 agent（默认）。',
+  },
 };
 const aliasesProperty = {
   type: 'array',

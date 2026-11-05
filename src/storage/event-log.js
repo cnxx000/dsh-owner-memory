@@ -46,14 +46,22 @@ function parseEventContent(root, content, options = {}) {
     }
   });
 
-  if (corruptLines > 0) {
-    updateHealth(root, (health) => ({
-      ...health,
-      // 同一坏行会在每次重建时再次被看见；指标表示坏行数，不能因重复扫描虚增。
-      corruptLines: Math.max(health.corruptLines ?? 0, corruptLines),
-    }));
-  }
   return { events, corruptLines };
+}
+
+/**
+ * 一次完整扫描（live + archive）后写坏行指标。
+ *
+ * `corruptLines` 是本轮实际看到的坏行数：重复扫描同一批坏行得到同一个数，坏行清掉后归零。
+ * 之前用 max 累计，历史峰值永远挂着（干净重建实测 0 条，health 仍报 30）。
+ * 历史峰值另存 `corruptLinesEver`；旧 health 里的 corruptLines 视为历史峰值迁入。
+ */
+function recordCorruptLines(root, corruptLines) {
+  updateHealth(root, (health) => ({
+    ...health,
+    corruptLines,
+    corruptLinesEver: Math.max(health.corruptLinesEver ?? 0, health.corruptLines ?? 0, corruptLines),
+  }));
 }
 
 export function readEvents(root, options = {}) {
@@ -138,8 +146,10 @@ export async function rebuildState(root, options = {}) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const before = fs.readFileSync(path.join(root, 'events.jsonl'));
       const sourceHash = calculateMetaFromBytes(before);
-      const { events } = parseEventContent(root, before.toString('utf8'));
-      const archived = readArchiveEvents(root).events;
+      const live = parseEventContent(root, before.toString('utf8'));
+      const { events } = live;
+      const archive = readArchiveEvents(root);
+      const archived = archive.events;
       const complete = [...archived, ...events].sort((left, right) => (
         Date.parse(left.ts) - Date.parse(right.ts) || left.id.localeCompare(right.id)
       ));
@@ -152,6 +162,7 @@ export async function rebuildState(root, options = {}) {
       }
       atomicWrite(path.join(root, 'state.json'), `${JSON.stringify(candidate, null, 2)}\n`);
       atomicWrite(path.join(root, 'events.jsonl.meta'), `${JSON.stringify(sourceHash)}\n`);
+      recordCorruptLines(root, live.corruptLines + archive.corruptLines);
       if (options.recordRebuild !== false) {
         updateHealth(root, (health) => ({
           ...health,
@@ -174,10 +185,14 @@ function verifyTail(root) {
     return parsed;
   } catch (error) {
     preserveCorruptLine(root, tail.number, tail.raw);
-    updateHealth(root, (health) => ({
-      ...health,
-      corruptLines: (health.corruptLines ?? 0) + 1,
-    }));
+    updateHealth(root, (health) => {
+      const corruptLines = (health.corruptLines ?? 0) + 1;
+      return {
+        ...health,
+        corruptLines,
+        corruptLinesEver: Math.max(health.corruptLinesEver ?? 0, corruptLines),
+      };
+    });
     const failure = new MemoryError('E_APPEND_VERIFY', '追加后末行校验失败，原始 logLine 已留证', {
       logLine: tail.raw,
       cause: error.message,
@@ -227,8 +242,11 @@ export async function appendEventToRoot(root, input, options = {}) {
   await withLock(root, options.lockName ?? 'append-event', () => {
     const before = fs.readFileSync(path.join(root, 'events.jsonl'));
     const sourceBefore = calculateMetaFromBytes(before);
-    const live = parseEventContent(root, before.toString('utf8'), options).events;
-    const archived = readArchiveEvents(root, options).events;
+    const liveParsed = parseEventContent(root, before.toString('utf8'), options);
+    const archiveParsed = readArchiveEvents(root, options);
+    recordCorruptLines(root, liveParsed.corruptLines + archiveParsed.corruptLines);
+    const live = liveParsed.events;
+    const archived = archiveParsed.events;
     const currentEvents = [...archived, ...live].sort((left, right) => (
       Date.parse(left.ts) - Date.parse(right.ts) || left.id.localeCompare(right.id)
     ));

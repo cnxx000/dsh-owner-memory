@@ -4,7 +4,7 @@ import path from 'node:path';
 import { DEFAULTS, rootForScope } from './config.js';
 import { buildIndex } from './indexer.js';
 import { readReceipts } from './recall-log.js';
-import { MemoryError } from './schema.js';
+import { MemoryError, viewKind } from './schema.js';
 import { scoreEvent } from './score.js';
 import { readJson } from './storage/files.js';
 import { rebuildState } from './storage/event-log.js';
@@ -65,12 +65,15 @@ function lastPickedById(receipts) {
   return picked;
 }
 
+// close/retract/revise/supersede/alias/symptom/confirm 等是对记忆的修正记录，本身不会「被遗忘」。
+const FADING_KINDS = new Set(['note', 'rule', 'decision', 'todo', 'fact']);
+
 function fadingEntries(state, receipts, now) {
   const index = buildIndex(state);
   const picked = lastPickedById(receipts);
   return Object.values(state.byId ?? {})
     .filter((event) => (
-      event.kind !== 'symptom'
+      FADING_KINDS.has(viewKind(event))
       && state.status?.[event.id]?.status === 'active'
     ))
     .map((event) => ({
@@ -148,6 +151,8 @@ function healthAudit(root, state, now) {
     injection: injectionDetails(health),
     metrics: {
       corruptLines: health.corruptLines ?? 0,
+      // 旧 health 没有 Ever 字段时，旧 corruptLines 本来就是只进不退的峰值。
+      corruptLinesEver: health.corruptLinesEver ?? health.corruptLines ?? 0,
       lock_stolen: health.lock_stolen ?? 0,
       rebuilt: health.rebuilt ?? 0,
       sourceHashMatches: sourceHashMatches(state, actual),
@@ -162,6 +167,7 @@ function healthAudit(root, state, now) {
       src_total_count: srcTotalCount,
       rules_overflow: Boolean(health.rules_overflow),
       rules_truncated_hard: Boolean(health.rules_truncated_hard),
+      rules_near_limit: Boolean(health.rules_near_limit),
       pit_overflow: Array.isArray(health.pit_overflow) ? health.pit_overflow : [],
       pit_symptom_missing: Array.isArray(health.pit_symptom_missing)
         ? health.pit_symptom_missing

@@ -111,23 +111,81 @@ test('A5b：5 条红线 + 完整 id 落在 300 内，不截断也不写 overflow
   t.diagnostic(`A5b rules chars=${rendered.join('\n').length} pinned chars=${pinned.length}`);
 });
 
-test('A5c：6 条全满 32 字红线仍溢出，配额不许再调大', (t) => {
-  // 6 条约 372 字符，300 装不下——溢出靠 §6.3 强制通道，不要靠调大配额。
+function footerOf(pinned) {
+  return pinned.split('\n').at(-1);
+}
+
+function rulesState(count, text) {
   const state = emptyState();
-  for (let index = 0; index < 6; index += 1) {
+  for (let index = 0; index < count; index += 1) {
     add(state, item(index, 'rule', {
       id: `m_mw0740${index}q_${index}c5c`,
-      text: '必须先确认并保留完整审计证据再动手改动任何配置文件和代码'.slice(0, 32),
+      text,
       weight: 5,
     }));
   }
+  return state;
+}
+
+test('C2（原 A5c）：6 条满 32 字红线全渲染 → 不报 overflow，只报 near_limit', (t) => {
+  // 6 条约 372 字符，名义上超 300 配额，但一行没丢、正文没压——尾注不能喊「已截断」。
+  const text = '必须先确认并保留完整审计证据再动手改动任何配置文件和代码'.slice(0, 32);
+  const state = rulesState(6, text);
+  const health = {};
+  const pinned = renderPinned(state, { now: new Date('2026-11-04T03:00:00Z'), health });
+
+  const rendered = pinned.split('\n').filter((line) => line.startsWith('[红线]'));
+  assert.equal(rendered.length, 6);
+  for (const line of rendered) assert.ok(!line.includes('…'), `正文不该被压：${line}`);
+  assert.equal(health.rules_overflow, false);
+  assert.equal(health.rules_truncated_hard, false);
+  assert.equal(health.rules_near_limit, true);
+  assert.equal(footerOf(pinned), "> 红线已接近配额，必要时 mem_recall(kinds=['rule'])。");
+  assert.ok(!pinned.includes('已截断'));
+  assert.ok(pinned.length <= 1200);
+  t.diagnostic(`C2 footer=${footerOf(pinned)}`);
+});
+
+test('C3：8 条红线（超 6 条两条）→ rules_overflow=true，尾注报未常驻', (t) => {
+  const state = rulesState(8, '短红线正文');
+  const health = {};
+  const pinned = renderPinned(state, { now: new Date('2026-11-04T03:00:00Z'), health });
+
+  assert.equal(pinned.split('\n').filter((line) => line.startsWith('[红线]')).length, 6);
+  assert.equal(health.rules_overflow, true);
+  assert.equal(health.rules_near_limit, false);
+  assert.equal(
+    footerOf(pinned),
+    "> 另有 2 条红线未常驻；任何写文件/改配置/跑命令之前，必须先 mem_recall(kinds=['rule'])。",
+  );
+  t.diagnostic(`C3 footer=${footerOf(pinned)}`);
+});
+
+test('C4：4 条短红线、预算充足 → 三个标志都 false，无红线尾注', (t) => {
+  const state = rulesState(4, '短红线正文');
+  const health = {};
+  const pinned = renderPinned(state, { now: new Date('2026-11-04T03:00:00Z'), health });
+
+  assert.equal(pinned.split('\n').filter((line) => line.startsWith('[红线]')).length, 4);
+  assert.equal(health.rules_overflow, false);
+  assert.equal(health.rules_truncated_hard, false);
+  assert.equal(health.rules_near_limit, false);
+  assert.equal(footerOf(pinned), '> 更多细节用 mem_recall 查。');
+  assert.ok(!pinned.includes('红线未常驻') && !pinned.includes('红线内容已截断') && !pinned.includes('接近配额'));
+  t.diagnostic(`C4 footer=${footerOf(pinned)}`);
+});
+
+test('C2b：没丢行但正文超 32 字被压 → 尾注报「红线内容已截断」', () => {
+  const state = rulesState(1, '这是一条明显超过三十二字符上限的红线正文，用来逼出截断标记和尾注验证。');
   const health = {};
   const pinned = renderPinned(state, { now: new Date('2026-11-04T03:00:00Z'), health });
 
   assert.equal(health.rules_overflow, true);
-  assert.ok(pinned.length <= 1200);
-  assert.equal(pinned.split('\n').filter((line) => line.startsWith('[红线]')).length, 6);
-  t.diagnostic(`A5c 6 条满额红线 → rules_overflow=${health.rules_overflow}`);
+  assert.equal(health.rules_near_limit, false);
+  assert.equal(
+    footerOf(pinned),
+    "> 红线内容已截断；任何写文件/改配置/跑命令之前，必须先 mem_recall(kinds=['rule'])。",
+  );
 });
 
 test('H1/H2/H3：新标题、事实主体标签与注入自检均正确，且条数和总预算不变', (t) => {

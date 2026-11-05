@@ -121,6 +121,7 @@ export function persistPinnedHealth(root, health = {}) {
       : 'none',
     rules_overflow: health.rules_overflow === true,
     rules_truncated_hard: health.rules_truncated_hard === true,
+    rules_near_limit: health.rules_near_limit === true,
     fact_overflow: Array.isArray(health.fact_overflow) ? [...health.fact_overflow] : [],
     fact_headline_missing: Array.isArray(health.fact_headline_missing)
       ? [...health.fact_headline_missing]
@@ -136,6 +137,7 @@ export function updateHealth(root, patch) {
   const file = path.join(root, 'health.json');
   const current = readJson(file, {
     corruptLines: 0,
+    corruptLinesEver: 0,
     lock_stolen: 0,
     rebuilt: 0,
     rules_overflow: 0,

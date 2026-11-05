@@ -15,7 +15,13 @@ export function sessionId(context = {}) {
   return value;
 }
 
+// 工具层只放开 agent/user；migrate:*、fold、review 是内部来源，事件 schema 认、但模型不能自称。
+export const TOOL_SRCS = Object.freeze(['agent', 'user']);
+
 export function commonInput(args, context) {
+  if (args.src !== undefined && !TOOL_SRCS.includes(args.src)) {
+    throw new MemoryError('E_SCHEMA', `src 只能是 ${TOOL_SRCS.join('/')}`);
+  }
   return {
     text: normalizeText(args.text),
     ...(args.tags !== undefined ? { tags: args.tags } : {}),

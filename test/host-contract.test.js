@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createTools } from '../src/host.js';
+import { readEvents } from '../src/storage/event-log.js';
 
 /**
  * 宿主 register() 契约。
@@ -47,6 +48,7 @@ function violationsOf(schema, value, at = 'value') {
       if (!Array.isArray(val)) { out.push(`${where} 不是数组`); return; }
       for (const [i, item] of val.entries()) if (node.items) visit(node.items, item, `${where}[${i}]`);
     } else if (node.type === 'string' && typeof val !== 'string') out.push(`${where} 不是字符串`);
+    else if (node.enum && !node.enum.includes(val)) out.push(`${where} 不在枚举内`);
     else if (node.type === 'integer' && !Number.isInteger(val)) out.push(`${where} 不是整数`);
     else if (node.type === 'boolean' && typeof val !== 'boolean') out.push(`${where} 不是布尔`);
   };
@@ -144,6 +146,56 @@ test('宿主契约：没 inject 的服务在属性访问时就抛，apply 也必
     config.cleanup();
   }
 });
+
+function eventById(config, id) {
+  return readEvents(config.root).events.find((event) => event.id === id);
+}
+
+for (const [label, toolName, baseArgs] of [
+  ['S1/S2/S3 mem_fact', 'mem_fact', { key: 'probe.来源', text: '主人说他的来源标记测试值是甲' }],
+  ['S4 mem_note', 'mem_note', { kind: 'note', text: '主人说这条来源标记测试笔记要记住' }],
+]) {
+  test(`${label}：src 可选 agent/user，默认 agent，非法值被拒`, async () => {
+    const config = makeConfig();
+    const context = { sessionId: 'contract-src' };
+    try {
+      const tool = createTools(config).find((item) => item.name === toolName);
+      const srcSchema = tool.parameters.properties.src;
+      assert.deepEqual(srcSchema.enum, ['agent', 'user']);
+      assert.equal(srcSchema.default, 'agent');
+      assert.match(srcSchema.description, /主人原话时用 user/u);
+
+      const user = await tool.execute({ ...baseArgs, src: 'user' }, context);
+      assert.deepEqual(violationsOf(tool.parameters, { ...baseArgs, src: 'user' }), []);
+      assert.equal(eventById(config, user.id).src, 'user');
+
+      const implicit = await tool.execute(
+        toolName === 'mem_fact'
+          ? { key: 'probe.默认来源', text: '没有声明来源的另一条事实' }
+          : { kind: 'todo', text: '没有声明来源的另一条待办事项' },
+        context,
+      );
+      assert.equal(eventById(config, implicit.id).src, 'agent');
+
+      const before = readEvents(config.root).events.length;
+      assert.deepEqual(
+        violationsOf(tool.parameters, { ...baseArgs, src: 'system' }),
+        ['value.src 不在枚举内'],
+        '宿主按参数 schema 拒绝',
+      );
+      for (const bad of ['system', 'review', 'migrate:p0', 'fold']) {
+        await assert.rejects(
+          tool.execute({ ...baseArgs, text: `${baseArgs.text}（${bad}）`, src: bad }, context),
+          (error) => error.code === 'E_SCHEMA',
+          `绕过宿主直接调用也不能自称 src=${bad}`,
+        );
+      }
+      assert.equal(readEvents(config.root).events.length, before, '被拒的调用不落事件');
+    } finally {
+      config.cleanup();
+    }
+  });
+}
 
 test('宿主契约：execute 的返回值满足各自的 output.schema（写入/召回/纠正跑一遍）', async () => {
   const config = makeConfig();

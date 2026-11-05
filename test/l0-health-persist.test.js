@@ -45,6 +45,11 @@ test('rules_overflow 落盘：截断写 true，不截断写回 false', (t) => {
   persistPinnedHealth(root, shortHealth);
   assert.equal(healthFile(root).rules_overflow, false);
 
+  persistPinnedHealth(root, { rules_overflow: false, rules_near_limit: true });
+  assert.equal(healthFile(root).rules_near_limit, true);
+  persistPinnedHealth(root, shortHealth);
+  assert.equal(healthFile(root).rules_near_limit, false);
+
   // 落盘只覆盖配额两项，别把别的 health 字段冲掉
   persistPinnedHealth(root, longHealth);
   assert.equal(healthFile(root).injection_missing, false);

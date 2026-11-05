@@ -96,3 +96,42 @@ test('坏 JSON 使快路径失效一次，随后原始字节 sourceHash 恢复�
   const healthAfterFastPath = readJson(path.join(root, 'health.json'));
   assert.equal(healthAfterFastPath.rebuilt, healthAfterRebuild.rebuilt);
 });
+
+test('C1：坏行按本轮实数计，清掉后重建归零，corruptLinesEver 保留峰值', async (t) => {
+  const root = workspace(t);
+  initRoot(root);
+  const events = mixedEvents().slice(0, 10);
+  const clean = `${events.map((item) => JSON.stringify(item)).join('\n')}\n`;
+  const healthFile = path.join(root, 'health.json');
+
+  fs.writeFileSync(path.join(root, 'events.jsonl'), `${clean}{bad 1\n{bad 2\n{bad 3\n`);
+  await rebuildState(root);
+  assert.equal(readJson(healthFile).corruptLines, 3);
+  assert.equal(readJson(healthFile).corruptLinesEver, 3);
+
+  // 同一批坏行再扫一遍（追加一条有效事件逼出重建），数不能虚增
+  fs.appendFileSync(path.join(root, 'events.jsonl'), `${JSON.stringify(baseEvent(900, 'note'))}\n`);
+  await rebuildState(root);
+  assert.equal(readJson(healthFile).corruptLines, 3);
+  assert.equal(readJson(healthFile).corruptLinesEver, 3);
+
+  // 坏行被清掉后干净重建：当前归零，历史峰值还在
+  fs.writeFileSync(path.join(root, 'events.jsonl'), clean);
+  await rebuildState(root);
+  const health = readJson(healthFile);
+  assert.equal(health.corruptLines, 0);
+  assert.equal(health.corruptLinesEver, 3);
+  assert.ok(fs.readdirSync(path.join(root, 'corrupt')).length >= 1, 'preserveCorruptLine 留证不变');
+});
+
+test('C1b：旧 health 里挂着的历史峰值迁入 corruptLinesEver，当前值按实数回落', async (t) => {
+  const root = workspace(t);
+  initRoot(root);
+  const events = mixedEvents().slice(0, 10);
+  fs.writeFileSync(path.join(root, 'events.jsonl'), `${events.map((item) => JSON.stringify(item)).join('\n')}\n`);
+  fs.writeFileSync(path.join(root, 'health.json'), `${JSON.stringify({ corruptLines: 30, rebuilt: 0 })}\n`);
+  await rebuildState(root);
+  const health = readJson(path.join(root, 'health.json'));
+  assert.equal(health.corruptLines, 0);
+  assert.equal(health.corruptLinesEver, 30);
+});

@@ -40,8 +40,15 @@ function workspace(t) {
 }
 
 function receiptFor(root, state, query) {
-  const result = recall(state, buildIndex(state), query, { now: NOW, log: root });
-  return { result, receipt: readReceipts(root, { limit: 1 })[0] };
+  // 落盘回执只留前 5 名的 id/score/why/base；aliasHit 等打分分量看内存里的完整回执。
+  let receipt;
+  const result = recall(state, buildIndex(state), query, {
+    now: NOW,
+    log: root,
+    onReceipt: (full) => { receipt = full; },
+  });
+  assert.equal(readReceipts(root, { limit: 1 })[0].receipt_id, result.receipt_id);
+  return { result, receipt };
 }
 
 test('N1：条目自带俗称按最长完整短语增加 base，并记录 aliasHit', async (t) => {

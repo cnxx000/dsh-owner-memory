@@ -237,10 +237,25 @@ function buildPinned(state, opts = {}) {
     .join('\n').length;
   let ruleTextLimit = 32;
   let ruleLines = rules.selected.map((event) => renderLine('红线', event, ruleTextLimit));
-  health.rules_overflow = rules.overflow.length > 0
-    || fullRuleChars > LIMITS.rulesChars
-    || rules.selected.some((event) => String(event.text).length > ruleTextLimit);
   health.rules_truncated_hard = false;
+  // rules_overflow 只记真实损失（有红线没常驻 / 正文被压）；名义宽度超预算但一行没丢只算 near_limit，
+  // 否则 6 条红线全渲染出来尾注也喊「已截断」。
+  const rulesTextCut = rules.selected.some((event) => String(event.text).length > 32);
+  const updateRuleFlags = () => {
+    health.rules_overflow = rules.overflow.length > 0 || rulesTextCut || health.rules_truncated_hard;
+    health.rules_near_limit = !health.rules_overflow && fullRuleChars > LIMITS.rulesChars;
+  };
+  const ruleFooter = () => {
+    if (rules.overflow.length > 0) {
+      return `> 另有 ${rules.overflow.length} 条红线未常驻；任何写文件/改配置/跑命令之前，必须先 mem_recall(kinds=['rule'])。`;
+    }
+    if (health.rules_overflow) {
+      return `> 红线内容已截断；任何写文件/改配置/跑命令之前，必须先 mem_recall(kinds=['rule'])。`;
+    }
+    if (health.rules_near_limit) return `> 红线已接近配额，必要时 mem_recall(kinds=['rule'])。`;
+    return '> 更多细节用 mem_recall 查。';
+  };
+  updateRuleFlags();
 
   const todos = fitSection('在办', selectTodos(state), LIMITS.todosChars);
   const factCandidates = rankedFacts(state, now);
@@ -258,11 +273,7 @@ function buildPinned(state, opts = {}) {
   const decisions = fitSection('决策', selectDecisions(state), LIMITS.decisionsChars);
   const pitIndex = renderPitIndex(state, health, opts.localRoot ?? opts.root);
   const title = `## 长期记忆（截至 ${now.toISOString().slice(0, 10)}；记的是主人和主人的项目，不含鲸鱼娘自己）`;
-  let footer = rules.overflow.length > 0
-    ? `> 另有 ${rules.overflow.length} 条红线未常驻；任何写文件/改配置/跑命令之前，必须先 mem_recall(kinds=['rule'])。`
-    : health.rules_overflow
-      ? `> 红线内容已截断；任何写文件/改配置/跑命令之前，必须先 mem_recall(kinds=['rule'])。`
-    : '> 更多细节用 mem_recall 查。';
+  let footer = ruleFooter();
 
   const compose = () => [
     title,
@@ -288,6 +299,8 @@ function buildPinned(state, opts = {}) {
     ruleTextLimit = hardLimit;
     ruleLines = rules.selected.map((event) => renderLine('红线', event, ruleTextLimit));
     health.rules_truncated_hard = true;
+    updateRuleFlags();
+    footer = ruleFooter();
     output = compose();
   }
 
@@ -321,6 +334,7 @@ function buildPinned(state, opts = {}) {
     });
     footer = '';
     health.rules_truncated_hard = true;
+    updateRuleFlags();
     output = compose().slice(0, LIMITS.total);
   }
   const renderedFactKeys = new Set(

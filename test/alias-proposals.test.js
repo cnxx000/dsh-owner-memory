@@ -156,7 +156,29 @@ test('apply 幂等、跟随 replaces、retract 作废并对 quote 脱敏', async
   assert.equal(state.aliases[doomed.id], undefined);
 });
 
+// 新回执落盘时候选只剩 id/score/why/base：picked 看回执顶层，kind 由挖掘器按 state 反查。
+function compactCandidates(receipt) {
+  return {
+    ...receipt,
+    candidateCount: receipt.candidates.length,
+    candidates: receipt.candidates.map(({ id, score, why, base }) => ({
+      id,
+      score,
+      ...(why !== undefined ? { why } : {}),
+      base,
+    })),
+  };
+}
+
 test('挖掘器识别 R/E/S/W，并跳过 rule 通道', async (t) => {
+  await assertMinesAllSignals(t, (receipt) => receipt);
+});
+
+test('挖掘器在裁短的新回执（无 kind/picked）上同样识别 R/E/S/W', async (t) => {
+  await assertMinesAllSignals(t, compactCandidates);
+});
+
+async function assertMinesAllSignals(t, shape) {
   const config = workspace(t);
   const targetR = await appendEvent(config, { kind: 'note', text: '甲目标信息。', sess: 'mine' });
   const targetE = await appendEvent(config, { kind: 'note', text: '乙目标信息。', sess: 'mine' });
@@ -203,7 +225,7 @@ test('挖掘器识别 R/E/S/W，并跳过 rule 通道', async (t) => {
   ];
   fs.writeFileSync(
     path.join(config.localRoot, 'recall-log.jsonl'),
-    `${receipts.map((receipt) => JSON.stringify(receipt)).join('\n')}\n`,
+    `${receipts.map((receipt) => JSON.stringify(shape(receipt))).join('\n')}\n`,
   );
 
   const result = await mineAliasProposals(config.localRoot);
@@ -212,4 +234,4 @@ test('挖掘器识别 R/E/S/W，并跳过 rule 通道', async (t) => {
     [['海豚暗号', 'E'], ['珊瑚暗号', 'R'], ['水草暗号', 'W'], ['鲸鱼暗号', 'S']].sort(),
   );
   assert.equal(result.proposals.some(({ phrase }) => phrase === '规则暗号'), false);
-});
+}

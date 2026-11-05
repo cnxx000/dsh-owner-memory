@@ -71,8 +71,10 @@ L0 通过 persona 的 `{{owner_memory}}` 变量进系统提示；L2 靠工具调
 
 | 字段 | 什么时候为 `true` | 该做什么 |
 |---|---|---|
-| `rules_overflow` | 有红线被挤出前 6，或红线全文字符超预算，或任一条超 32 字 | 看 L0 尾注分辨是「溢出」还是「截断」；前者先 `mem_recall(kinds=['rule'])` |
+| `rules_overflow` | 真有损失：有红线被挤出前 6，或任一条正文超 32 字被压，或 `rules_truncated_hard` | 看 L0 尾注分辨是「未常驻」还是「已截断」；前者先 `mem_recall(kinds=['rule'])` |
+| `rules_near_limit` | 红线一行没丢、正文没压，但名义宽度超过 300 字配额 | 只是提醒；尾注写「红线已接近配额」，必要时 `mem_recall(kinds=['rule'])` |
 | `rules_truncated_hard` | 红线正文被压到 16 / 8 字符 | 红线写太长了，删/合并或把细节挪进 `note` |
+| `corruptLines` / `corruptLinesEver` | 前者是最近一次完整扫描（live + archive）实际看到的坏行数，坏行清掉后归零；后者是历史峰值 | 坏行原文在 `corrupt/` 下留证 |
 | `injection_missing` | 当前 agent 的注入判定为 `missing`（人设引用了变量，但变量没注册、或引用段 `interpolate=false`、或 provider 抛错） | 先看 `mem_audit(what="health")` 里的 per-agent 明细与 `reason`；`deferred` 不算缺失 |
 | `vec_index_stale` | `events.jsonl` 与向量索引版本不一致 | 当前轮自动退回纯字面；后台重建成功后下一轮恢复（向量默认关闭，一般不会出现） |
 | `vector_disabled` | 模型缺失、加载失败或启动超时 | 当前轮自动退回纯字面；按记录的原因修模型安装（向量默认关闭） |
@@ -182,6 +184,15 @@ fixtures/         测试夹具（假宿主、子进程写入器）
 ```
 
 ## 变更记录
+
+### 0.2.2（2026-11-05）
+
+- **指标口径修正**：`corruptLines` 改成「最近一次完整扫描（live + archive）实际看到的坏行数」，坏行清掉后归零；历史峰值另存 `corruptLinesEver`，旧 `health.json` 里的 `corruptLines` 自动迁入当峰值。（之前用 `max` 累计，干净重建实测 0 条，指标仍挂着 30。）
+- **`rules_overflow` 只在真有损失时为真**：红线没常驻、或正文被压到 32 字、或 `rules_truncated_hard`。新增 `rules_near_limit`，表示「一行没丢但名义宽度超 300 字配额」。L0 红线尾注因此分四种说法：未常驻 / 已截断 / 接近配额 / 正常。
+- **审计收紧**：`suspected_should_be_fact` 与写入提醒 `factSmellWarnings` 同口径——正文要同时撞上某个事实键的对象和方面，只撞「状态」「位置」这类方面词不再报噪音；`fadingEntries` 只统计 `note / rule / decision / todo / fact`，修正类事件（`close / retract / revise / supersede / alias / symptom / confirm`）本来就不会「被遗忘」。
+- **回执瘦身**：`recall-log.jsonl` 每条只留得分前 5 的候选（`id` / `score` / `why` / `base`）+ `candidateCount`；裁剪阈值提到 260 条，攒够再整体重写，避免每追加一条就重写整个文件。别名挖掘改为看回执顶层 `picked`、kind 权重从 state 反查；需要完整回执的调用方用 `onReceipt` 拿内存版。
+- **新增 `src` 通道**：`mem_fact` / `mem_note` 接受 `src: agent | user`（默认 `agent`，模型只能写这两个值），用于统计主人原话比例；`migrate:*`、`fold`、`review` 等内部来源不进 schema。
+- 测试 222 条全通过。
 
 ### 0.2.1（2026-11-05）
 

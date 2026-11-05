@@ -358,8 +358,10 @@ function buildReceipt(state, index, query, options) {
   };
 }
 
-function logReceipt(root, receipt) {
-  if (typeof root === 'string' && root) appendReceipt(root, receipt);
+// recall-log 落盘只留前几名候选；需要完整候选明细（逐条原因码、打分分量）的调用方用 onReceipt 取内存版。
+function logReceipt(opts, receipt) {
+  opts.onReceipt?.(receipt);
+  if (typeof opts.log === 'string' && opts.log) appendReceipt(opts.log, receipt);
 }
 
 export function recallRules(state, index, opts = {}) {
@@ -390,7 +392,7 @@ export function recallRules(state, index, opts = {}) {
     receipt_id: receiptId(query, { channel: 'rule', limit, maxChars }, items.map((item) => item.id)),
     items,
   };
-  logReceipt(opts.log, buildReceipt(state, index, query, {
+  logReceipt(opts, buildReceipt(state, index, query, {
     receipt_id: result.receipt_id,
     now,
     items,
@@ -568,7 +570,7 @@ export function recall(state, index, query, opts = {}) {
     }, items.map((item) => item.id)),
     items,
   };
-  logReceipt(opts.log, buildReceipt(state, index, query, {
+  logReceipt(opts, buildReceipt(state, index, query, {
     receipt_id: result.receipt_id,
     now,
     items,

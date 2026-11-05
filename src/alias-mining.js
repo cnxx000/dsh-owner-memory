@@ -3,6 +3,8 @@ import { mergeAliasProposals } from './alias-proposals.js';
 import { buildIndex } from './indexer.js';
 import { loadAliasTable, recall } from './recall.js';
 import { readReceipts } from './recall-log.js';
+import { viewKind } from './schema.js';
+import { KIND_WEIGHT } from './score.js';
 import { readJson } from './storage/files.js';
 import { normalizeForSearch } from './tokenize.js';
 
@@ -13,15 +15,26 @@ function highest(candidates, field = 'score') {
   ))[0];
 }
 
-function classifyFailure(receipt) {
+// 落盘回执只留前几名候选的 id/score/why/base；入选看顶层 picked，kind 权重按 state 里的事件反查。
+function wasPicked(receipt, candidate) {
+  return (receipt.picked ?? []).includes(candidate.id);
+}
+
+function kindWeight(state, candidate) {
+  if (candidate.kind !== undefined) return candidate.kind;
+  const event = state.byId?.[candidate.id];
+  return event ? KIND_WEIGHT[viewKind(event)] ?? 0 : 0;
+}
+
+function classifyFailure(receipt, state) {
   const candidates = receipt.candidates ?? [];
   const top = highest(candidates);
   if (top?.why === 'status_penalty') return { signal: 'S', targetId: top.id };
   if ((receipt.picked ?? []).length === 0) {
-    const target = highest(candidates.filter((candidate) => (candidate.kind ?? 0) > 0));
+    const target = highest(candidates.filter((candidate) => kindWeight(state, candidate) > 0));
     return target ? { signal: 'E', targetId: target.id } : null;
   }
-  const picked = candidates.filter((candidate) => candidate.picked);
+  const picked = candidates.filter((candidate) => wasPicked(receipt, candidate));
   const bestPicked = highest(picked, 'base');
   if (bestPicked && bestPicked.base < 3) return { signal: 'W', targetId: bestPicked.id };
   return null;
@@ -118,7 +131,7 @@ export async function mineAliasProposals(root, options = {}) {
 
   for (let leftIndex = 0; leftIndex < receipts.length; leftIndex += 1) {
     const failed = receipts[leftIndex];
-    const failure = classifyFailure(failed);
+    const failure = classifyFailure(failed, state);
     if (!failure || !failed.sess) continue;
     for (let rightIndex = leftIndex + 1; rightIndex < receipts.length; rightIndex += 1) {
       const hit = receipts[rightIndex];
@@ -126,7 +139,7 @@ export async function mineAliasProposals(root, options = {}) {
       if (delta > 10 * 60 * 1000) break;
       if (hit.sess !== failed.sess) continue;
       const matched = (hit.candidates ?? []).find((candidate) => (
-        candidate.id === failure.targetId && candidate.picked && candidate.base >= 3
+        candidate.id === failure.targetId && wasPicked(hit, candidate) && candidate.base >= 3
       ));
       if (!matched) continue;
       consider(failed, 'R', failure.targetId);
@@ -135,7 +148,7 @@ export async function mineAliasProposals(root, options = {}) {
   }
 
   for (const receipt of receipts) {
-    const failure = classifyFailure(receipt);
+    const failure = classifyFailure(receipt, state);
     if (failure) consider(receipt, failure.signal, failure.targetId);
   }
 
