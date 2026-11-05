@@ -181,7 +181,10 @@ src/
   storage/        事件流、原子写、文件锁
 test/             node:test 用例
 fixtures/         测试夹具（假宿主、子进程写入器）
+docs/             设计文档快照（工作区根的同名文件同步而来，发版时更新一次）
 ```
+
+设计文档（三层结构、配额算法、验收表、各批落地变更）在 [`docs/memory-system-design.md`](docs/memory-system-design.md)。
 
 ## 变更记录
 
