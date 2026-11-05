@@ -181,7 +181,7 @@ export function createTools(options = {}) {
     },
     {
       name: 'mem_note',
-      description: '只新增无键事件，不会原地改写。带 tags:["坑"] 的 note 可提供 1–2 个 symptom（每个 2–8 字）和 1–3 个 ask（每个 6–40 字），用于报错前的坑类索引；其它 kind 禁止提供。replaces 可取代 1–3 条 active、同 kind、非 fact 条目；目标无效报 E_REPLACES_TARGET，kind 不同或含 fact 报 E_REPLACES_KIND。会变化的事实必须用带同一 key 的 mem_fact。',
+      description: '只新增无键事件，不会原地改写。带 tags:["坑"] 的 note 可提供 1–2 个 symptom（每个 2–8 字），用于报错前的坑类索引；写坑时顺手给 1–3 句 ask（用户会怎么问，每句 6–40 字），用于检索扩写，不写就只能靠症状词命中。两者仅限坑类 note，其它 kind 禁止提供。replaces 可取代 1–3 条 active、同 kind、非 fact 条目；目标无效报 E_REPLACES_TARGET，kind 不同或含 fact 报 E_REPLACES_KIND。会变化的事实必须用带同一 key 的 mem_fact。',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -201,6 +201,7 @@ export function createTools(options = {}) {
             items: { type: 'string', minLength: 6, maxLength: 40, pattern: '^[^\\r\\n]+$' },
             minItems: 1,
             maxItems: 3,
+            description: '仅坑类 note：1–3 句用户口吻问法，每句 6–40 字，用于检索扩写。',
           },
           aliases: aliasesProperty,
           aliasQuote: aliasQuoteProperty,
